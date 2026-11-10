@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>Тренер боя</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Unbounded:wght@500;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap"
+    />
+  </head>
+  <body>
+    <header class="top">
+      <div class="brand">
+        <h1>Тренер боя</h1>
+        <p>Плечо, локоть, кисть и пальцы играющей руки в реальном времени</p>
+      </div>
+      <div class="controls">
+        <label class="field">
+          <span>Играющая рука</span>
+          <select id="arm">
+            <option value="right">Правая</option>
+            <option value="left">Левая</option>
+          </select>
+        </label>
+        <label class="check"><input id="mirror" type="checkbox" checked /> Зеркало</label>
+        <button id="calib" class="btn ghost" disabled>Калибровка, 3 с</button>
+      </div>
+    </header>
+
+    <main class="layout">
+      <section class="stage-wrap">
+        <div id="stage" class="stage mirrored">
+          <video id="video" playsinline muted></video>
+          <canvas id="overlay"></canvas>
+          <div id="intro" class="intro">
+            <h2>Поставьте камеру так, чтобы в кадре были плечо, локоть и кисть играющей руки</h2>
+            <p>Лучше всего спереди, чуть сбоку, на уровне груди. Ровный свет на руку.</p>
+            <button id="start" class="btn">Включить камеру</button>
+            <p id="intro-status" class="intro-status" role="status"></p>
+          </div>
+        </div>
+        <div class="chips" aria-label="Что видно в кадре">
+          <span id="t-shoulder" class="chip">Плечо</span>
+          <span id="t-elbow" class="chip">Локоть</span>
+          <span id="t-wrist" class="chip">Запястье</span>
+          <span id="t-hand" class="chip">Пальцы</span>
+          <span id="fps" class="chip mono">— к/с</span>
+        </div>
+      </section>
+
+      <aside class="panel">
+        <div id="verdict" class="verdict" data-level="lost">
+          <span id="v-pill" class="pill">Нет данных</span>
+          <h2 id="v-title">Рука не в кадре</h2>
+          <p id="v-text">Включите камеру, чтобы начать.</p>
+        </div>
+
+        <section class="block">
+          <div class="block-head">
+            <h3>Откуда движение</h3>
+            <span class="hint">цель: локоть</span>
+          </div>
+          <div class="shares" id="shares">
+            <div id="s-shoulder" class="seg seg-shoulder"></div>
+            <div id="s-elbow" class="seg seg-elbow"></div>
+            <div id="s-wrist" class="seg seg-wrist"></div>
+          </div>
+          <div class="share-legend">
+            <span><i class="sw seg-shoulder"></i>Плечо <b id="sl-shoulder" class="mono">—</b></span>
+            <span><i class="sw seg-elbow"></i>Локоть и предплечье <b id="sl-elbow" class="mono">—</b></span>
+            <span><i class="sw seg-wrist"></i>Кисть <b id="sl-wrist" class="mono">—</b></span>
+          </div>
+        </section>
+
+        <section class="block">
+          <div class="block-head">
+            <h3>Расслабленность</h3>
+            <span id="relax-total" class="big mono">—</span>
+          </div>
+          <ul class="meters">
+            <li><span>Запястье свободно</span><div class="bar"><i id="m-wrist"></i></div><b id="v-wrist" class="mono">—</b></li>
+            <li><span>Кисть-хлыст</span><div class="bar"><i id="m-whip"></i></div><b id="v-whip" class="mono">—</b></li>
+            <li><span>Пальцы мягкие</span><div class="bar"><i id="m-fingers"></i></div><b id="v-fingers" class="mono">—</b></li>
+            <li><span>Плечо опущено</span><div class="bar"><i id="m-shoulder"></i></div><b id="v-shoulder" class="mono">—</b></li>
+            <li><span>Плавность</span><div class="bar"><i id="m-smooth"></i></div><b id="v-smooth" class="mono">—</b></li>
+          </ul>
+          <p class="note" id="calib-note">Плечо оценивается после калибровки: сядьте с гитарой расслабленно и нажмите «Калибровка».</p>
+        </section>
+
+        <section class="block">
+          <div class="stats">
+            <div><span>Темп</span><b id="spm" class="mono">—</b><small>ударов/мин</small></div>
+            <div><span>Размах</span><b id="amp" class="mono">—</b><small>длины предплечья</small></div>
+            <div><span>Чисто</span><b id="good" class="mono">—</b><small>времени игры</small></div>
+          </div>
+          <div class="trace-head"><h3>Удары, 4 с</h3><span class="hint">точки: низ и верх удара</span></div>
+          <canvas id="trace" class="trace"></canvas>
+        </section>
+
+        <ul id="tips" class="tips"></ul>
+
+        <details class="raw">
+          <summary>Сырые показатели</summary>
+          <pre id="raw" class="mono"></pre>
+        </details>
+      </aside>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
