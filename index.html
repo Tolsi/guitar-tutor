@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-    <title>Тренер боя</title>
+    <title>Гитарный тренер</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -13,10 +13,16 @@
   </head>
   <body>
     <header class="top">
-      <div class="brand">
-        <h1>Тренер боя</h1>
-        <p>Плечо, локоть, кисть и пальцы играющей руки в реальном времени</p>
-      </div>
+      <h1 class="brand">Гитарный тренер</h1>
+      <nav class="tabs" aria-label="Упражнения">
+        <a href="#strum">Правая рука при игре боем</a>
+        <a href="#legato">Легатная техника</a>
+      </nav>
+    </header>
+
+    <div id="tab-strum" class="tab">
+    <div class="toolbar">
+      <p class="lede">Камера следит за плечом, локтем, кистью и пальцами играющей руки.</p>
       <div class="controls">
         <label class="field">
           <span>Играющая рука</span>
@@ -28,7 +34,7 @@
         <label class="check"><input id="mirror" type="checkbox" checked /> Зеркало</label>
         <button id="calib" class="btn ghost" disabled>Калибровка, 3 с</button>
       </div>
-    </header>
+    </div>
 
     <main class="layout">
       <section class="stage-wrap">
@@ -108,6 +114,96 @@
         </details>
       </aside>
     </main>
+    </div>
+
+    <div id="tab-legato" class="tab" hidden>
+      <div class="toolbar">
+        <p class="lede">Подключите гитару через звуковую карту или поставьте микрофон рядом. Каждая нота проверяется на ровную высоту: без вилянья, пережима и подтяжек.</p>
+        <div class="controls">
+          <button id="lg-start" class="btn">Включить аудиовход</button>
+          <label class="field">
+            <span>Вход</span>
+            <select id="lg-device" disabled><option>—</option></select>
+          </label>
+          <label class="field">
+            <span>Строгость</span>
+            <select id="lg-strict">
+              <option value="soft">Мягко</option>
+              <option value="normal">Обычно</option>
+              <option value="strict">Строго</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Порог входа <b id="lg-gate-v" class="mono"></b></span>
+            <input id="lg-gate" type="range" min="-75" max="-20" step="1" />
+          </label>
+          <label class="field">
+            <span>Ля, Гц</span>
+            <input id="lg-a4" type="number" min="415" max="466" step="1" class="num" />
+          </label>
+        </div>
+      </div>
+
+      <main class="layout lg-layout">
+        <section class="lg-main">
+          <div class="tuner">
+            <div class="tuner-note">
+              <b id="lg-note">—</b>
+              <span id="lg-cents" class="mono"></span>
+              <span id="lg-wobble" class="mono lg-wob"></span>
+            </div>
+            <div class="tuner-scale" aria-hidden="true">
+              <span class="tick" style="left: 0%">−50</span>
+              <span class="tick" style="left: 25%">−25</span>
+              <span class="tick zero" style="left: 50%">0</span>
+              <span class="tick" style="left: 75%">+25</span>
+              <span class="tick" style="left: 100%">+50 ц</span>
+              <i id="lg-needle" class="needle"></i>
+            </div>
+            <div class="level" title="Уровень входа"><i id="lg-level"></i></div>
+            <p id="lg-status" class="note" role="status">Вход выключен.</p>
+          </div>
+
+          <div class="lg-card">
+            <div class="block-head"><h3>Высота нот, 6 с</h3><span class="hint">зелёная — чистая, красная — с ошибкой</span></div>
+            <canvas id="lg-trace" class="lg-trace"></canvas>
+          </div>
+
+          <div class="lg-card">
+            <div class="block-head">
+              <h3 id="lg-detail-title">Сыграйте ноту</h3>
+              <button id="lg-play" class="btn ghost small" hidden>Прослушать</button>
+            </div>
+            <canvas id="lg-detail" class="lg-detail"></canvas>
+            <div id="lg-detail-text"></div>
+          </div>
+        </section>
+
+        <aside class="panel">
+          <div class="lg-take">
+            <button id="lg-rec" class="btn rec" disabled>Записать дубль</button>
+            <button id="lg-clear" class="btn ghost">Очистить</button>
+          </div>
+          <audio id="lg-audio" controls hidden></audio>
+
+          <section class="block">
+            <div class="stats">
+              <div><span>Нот</span><b id="lg-count" class="mono">0</b><small>в дубле</small></div>
+              <div><span>Чисто</span><b id="lg-clean" class="mono">—</b><small>нот без ошибок</small></div>
+              <div><span>Чаще всего</span><b id="lg-top" class="lg-top">—</b></div>
+            </div>
+          </section>
+
+          <ul id="lg-tips" class="tips"></ul>
+
+          <section class="block">
+            <div class="block-head"><h3>Сыгранные ноты</h3><span class="hint">нажмите, чтобы разобрать</span></div>
+            <p id="lg-empty" class="note">Здесь появятся ноты. Сыграйте, например, легато 5-7-8 лад на струне соль.</p>
+            <div id="lg-list" class="lg-list"></div>
+          </section>
+        </aside>
+      </main>
+    </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
