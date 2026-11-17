@@ -42,6 +42,10 @@ let gain = 1;
 let levelDb = -Infinity;
 let hoverX: number | null = null;
 let play: { src: AudioBufferSourceNode; from: number; at: number } | null = null;
+/** Where Space starts playback (set by a click on the wave). */
+let marker: number | null = null;
+/** Where playback was paused; Space resumes from here until a new marker is set. */
+let pausedAt: number | null = null;
 
 const wave = $<HTMLCanvasElement>("wv-canvas");
 const over = $<HTMLCanvasElement>("wv-over");
@@ -54,6 +58,7 @@ interface Colors {
   axis: string;
   text: string;
   play: string;
+  marker: string;
 }
 function readColors(): Colors {
   const cs = getComputedStyle(document.documentElement);
@@ -66,6 +71,7 @@ function readColors(): Colors {
     axis: v("--scope-axis"),
     text: v("--scope-text"),
     play: v("--scope-play"),
+    marker: v("--scope-marker"),
   };
 }
 let col = readColors();
@@ -183,31 +189,44 @@ function setRecording(on: boolean) {
   clampView();
 }
 
-function stopPlay() {
+const playPos = () => (play && ctx ? play.from + (ctx.currentTime - play.at) : null);
+
+function stopPlay(pause = false) {
   if (!play) return;
+  pausedAt = pause ? playPos() : null;
   play.src.onended = null;
   play.src.stop();
   play = null;
-  $("wv-play").textContent = "Прослушать видимое";
+  $("wv-play").textContent = "▶ Играть";
+}
+
+function setMarker(t: number) {
+  marker = Math.min(Math.max(t, 0), total());
+  pausedAt = null;
+  if (play) {
+    stopPlay();
+    togglePlay();
+  }
 }
 
 function togglePlay() {
-  if (play) return stopPlay();
+  if (play) return stopPlay(true);
   if (!ctx || !store || !store.length) return;
-  const from = viewStart;
-  const dur = Math.min(Math.max(viewSpan, 1), 120);
-  const data = store.slice(from * sr, (from + dur) * sr);
+  let from = pausedAt ?? marker ?? viewStart;
+  if (from >= total() - 0.01) from = marker ?? 0;
+  pausedAt = null;
+  const data = store.slice(from * sr, store.length);
   if (!data.length) return;
   const buf = ctx.createBuffer(1, data.length, sr);
   buf.copyToChannel(data, 0);
   const src = ctx.createBufferSource();
   src.buffer = buf;
   src.connect(ctx.destination);
-  src.onended = stopPlay;
+  src.onended = () => stopPlay();
   void ctx.resume();
   src.start();
   play = { src, from, at: ctx.currentTime };
-  $("wv-play").textContent = "Стоп";
+  $("wv-play").textContent = "❚❚ Пауза";
 }
 
 function clearAll() {
@@ -216,6 +235,7 @@ function clearAll() {
   follow = true;
   viewSpan = 3;
   hoverX = null;
+  marker = pausedAt = null;
   if (store && ctx && !recording) setRecording(true);
   clampView();
 }
@@ -334,12 +354,27 @@ function drawWave() {
     g.textAlign = "start";
   }
 
-  if (play && ctx) {
-    const t = play.from + (ctx.currentTime - play.at);
-    const x = ((t - viewStart) / viewSpan) * W;
+  const xOf = (t: number) => ((t - viewStart) / viewSpan) * W;
+  if (marker !== null) {
+    const x = Math.round(xOf(marker));
+    if (x >= -6 * dpr && x <= W + 6 * dpr) {
+      g.fillStyle = col.marker;
+      g.fillRect(x, top, 2 * dpr, H - top);
+      g.beginPath();
+      g.moveTo(x - 6 * dpr, top);
+      g.lineTo(x + 8 * dpr, top);
+      g.lineTo(x + dpr, top + 9 * dpr);
+      g.fill();
+    }
+  }
+  const pos = playPos() ?? pausedAt;
+  if (pos !== null) {
+    const x = xOf(pos);
     if (x >= 0 && x <= W) {
       g.fillStyle = col.play;
+      g.globalAlpha = play ? 1 : 0.55;
       g.fillRect(Math.round(x), top, 2 * dpr, H - top);
+      g.globalAlpha = 1;
     }
   }
   if (hoverX !== null) {
@@ -404,11 +439,21 @@ function renderStats() {
       return;
     }
   }
-  cur.textContent = follow && recording ? "Режим реального времени" : "Наведите на волну";
+  const at = playPos() ?? pausedAt ?? marker;
+  if (at !== null) {
+    const m = Math.floor(at / 60);
+    const what = play ? "Играет" : pausedAt !== null ? "Пауза на" : "Маркер";
+    cur.textContent = `${what} ${m}:${(at - m * 60).toFixed(3).padStart(6, "0")} · пробел — ${play ? "пауза" : "играть"}`;
+  } else cur.textContent = follow && recording ? "Режим реального времени · клик по волне ставит маркер" : "Клик по волне ставит маркер";
 }
 
 function loop() {
   if (!visible) return;
+  const pos = playPos();
+  if (pos !== null && !drag && (pos > viewStart + viewSpan || pos < viewStart)) {
+    follow = false;
+    viewStart = pos - viewSpan * 0.05;
+  }
   clampView();
   drawWave();
   drawOverview();
@@ -458,23 +503,29 @@ function panBy(dt: number) {
   if (recording && viewStart + viewSpan >= total() - 1e-4 && dt > 0) follow = true;
 }
 
-let drag: { x: number; start: number } | null = null;
+let drag: { x: number; start: number; moved: boolean } | null = null;
 wave.addEventListener("pointerdown", (e) => {
   if (e.button !== 0) return;
   wave.setPointerCapture(e.pointerId);
-  drag = { x: e.clientX, start: viewStart };
+  drag = { x: e.clientX, start: viewStart, moved: false };
   wave.classList.add("dragging");
 });
 wave.addEventListener("pointermove", (e) => {
   const rect = wave.getBoundingClientRect();
   hoverX = e.clientX - rect.left;
   if (!drag) return;
+  if (Math.abs(e.clientX - drag.x) > 3) drag.moved = true;
+  if (!drag.moved) return;
   const dt = ((drag.x - e.clientX) / rect.width) * viewSpan;
   follow = false;
   viewStart = drag.start + dt;
   clampView();
 });
-const endDrag = () => {
+const endDrag = (e: PointerEvent) => {
+  if (drag && !drag.moved && e.type === "pointerup" && store?.length) {
+    const rect = wave.getBoundingClientRect();
+    setMarker(viewStart + ((e.clientX - rect.left) / rect.width) * viewSpan);
+  }
   drag = null;
   wave.classList.remove("dragging");
 };
@@ -510,6 +561,16 @@ $("wv-start").addEventListener("click", () => void openInput());
 $("wv-rec").addEventListener("click", () => setRecording(!recording));
 $("wv-clear").addEventListener("click", clearAll);
 $("wv-play").addEventListener("click", togglePlay);
+
+window.addEventListener("keydown", (e) => {
+  if (!visible || e.code !== "Space" || e.repeat || e.metaKey || e.ctrlKey || e.altKey) return;
+  const t = e.target as HTMLElement;
+  if (t.closest("input, select, textarea, [contenteditable]")) return;
+  e.preventDefault();
+  // Space on a focused button would also click it.
+  if (t instanceof HTMLButtonElement) t.blur();
+  togglePlay();
+});
 $("wv-all").addEventListener("click", showAll);
 $("wv-live").addEventListener("click", () => {
   follow = true;
