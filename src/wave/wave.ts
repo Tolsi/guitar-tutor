@@ -9,10 +9,11 @@ const SETTINGS_KEY = "wave-settings";
 
 interface Settings {
   deviceId: string;
+  outId: string;
   mon: MonitorSettings;
 }
 function loadSettings(): Settings {
-  const def = (): Settings => ({ deviceId: "", mon: { ...MONITOR_DEFAULTS } });
+  const def = (): Settings => ({ deviceId: "", outId: "", mon: { ...MONITOR_DEFAULTS } });
   try {
     const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? "{}");
     const d = def();
@@ -187,6 +188,47 @@ async function fillDevices(currentId: string) {
     }),
   );
   sel.disabled = false;
+  await fillOutputs();
+}
+
+type SinkContext = AudioContext & { setSinkId?: (id: string) => Promise<void> };
+
+async function fillOutputs() {
+  const sel = $<HTMLSelectElement>("mo-out");
+  if (!(ctx as SinkContext | null)?.setSinkId) {
+    sel.title = "Этот браузер не умеет выбирать выход: используется системный.";
+    return;
+  }
+  const outs = (await navigator.mediaDevices.enumerateDevices()).filter(
+    (d) => d.kind === "audiooutput" && d.deviceId !== "default",
+  );
+  const def = document.createElement("option");
+  def.value = "";
+  def.textContent = "Системный по умолчанию";
+  sel.replaceChildren(
+    def,
+    ...outs.map((d, i) => {
+      const o = document.createElement("option");
+      o.value = d.deviceId;
+      o.textContent = d.label || `Выход ${i + 1}`;
+      return o;
+    }),
+  );
+  if (!outs.some((d) => d.deviceId === settings.outId)) settings.outId = "";
+  sel.value = settings.outId;
+  sel.disabled = false;
+  await applySink();
+}
+
+async function applySink() {
+  const c = ctx as SinkContext | null;
+  if (!c?.setSinkId) return;
+  try {
+    await c.setSinkId(settings.outId);
+  } catch (e) {
+    console.error(e);
+    moStatus(`Не удалось переключить выход: ${(e as Error).message}`);
+  }
 }
 
 const ICON = {
@@ -752,6 +794,11 @@ moFile.addEventListener("change", async () => {
 });
 moFile.addEventListener("cancel", () => renderMonitorControls());
 
+$<HTMLSelectElement>("mo-out").addEventListener("change", (e) => {
+  settings.outId = (e.target as HTMLSelectElement).value;
+  saveSettings();
+  void applySink();
+});
 $<HTMLInputElement>("mo-cab").addEventListener("change", (e) => {
   settings.mon.cab = (e.target as HTMLInputElement).checked;
   monitorChanged();

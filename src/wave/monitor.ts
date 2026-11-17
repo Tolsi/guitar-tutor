@@ -160,7 +160,7 @@ export class Monitor {
       new BiquadFilterNode(ctx, { type: "lowpass", frequency: 4800, Q: 0.7 }),
       new BiquadFilterNode(ctx, { type: "lowpass", frequency: 6200, Q: 1 }),
     ];
-    cabNodes.reduce<AudioNode>((a, b) => a.connect(b), cabNodes[0]);
+    cabNodes.slice(1).reduce<AudioNode>((a, b) => a.connect(b), cabNodes[0]);
     this.cab = new Bypass(ctx, cabNodes[0], cabNodes[cabNodes.length - 1]);
     this.norm = ctx.createGain();
     nam.connect(this.norm).connect(this.cab.input);
