@@ -1,5 +1,6 @@
 import workletUrl from "./capture-worklet.ts?worker&url";
 import { SampleStore } from "./store";
+import { PmAnalyzer, isPalmMuted, type PmNote } from "./pm";
 import { AMPS, MONITOR_DEFAULTS, Monitor, type DistType, type MonitorSettings } from "./monitor";
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -10,10 +11,12 @@ const SETTINGS_KEY = "wave-settings";
 interface Settings {
   deviceId: string;
   outId: string;
+  exercise: "free" | "pm";
+  pmLimMs: number;
   mon: MonitorSettings;
 }
 function loadSettings(): Settings {
-  const def = (): Settings => ({ deviceId: "", outId: "", mon: { ...MONITOR_DEFAULTS } });
+  const def = (): Settings => ({ deviceId: "", outId: "", exercise: "free", pmLimMs: 350, mon: { ...MONITOR_DEFAULTS } });
   try {
     const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? "{}");
     const d = def();
@@ -140,6 +143,7 @@ async function openInput() {
       await ctx.audioWorklet.addModule(workletUrl);
       sr = ctx.sampleRate;
       store = new SampleStore(MAX_SECONDS * sr);
+      pm = new PmAnalyzer(sr);
     }
     await ctx.resume();
     source = ctx.createMediaStreamSource(stream);
@@ -321,6 +325,7 @@ function togglePlay() {
 }
 
 function clearAll() {
+  pm?.reset();
   stopPlay();
   store?.clear();
   follow = true;
@@ -445,6 +450,7 @@ function drawWave() {
   }
 
   const xOf = (t: number) => ((t - viewStart) / viewSpan) * W;
+  if (settings.exercise === "pm" && pm) drawPmMarks(g, W, H, top, dpr, xOf);
   if (marker !== null) {
     const x = Math.round(xOf(marker));
     if (x >= 0 && x <= W) {
@@ -538,6 +544,10 @@ function renderTime() {
 function loop() {
   if (!visible) return;
   renderTime();
+  if (settings.exercise === "pm" && pm && store) {
+    pm.update(store);
+    if (pm.version !== pmRendered) renderPm();
+  }
   const pos = playPos();
   if (pos !== null && !drag && (pos > viewStart + viewSpan || pos < viewStart)) {
     follow = false;
@@ -820,3 +830,148 @@ for (const sl of SLIDERS)
 // Browsers restore checkbox state on reload; monitoring always starts off.
 $<HTMLInputElement>("mo-on").checked = false;
 renderMonitorControls();
+
+// ---------- palm mute exercise ----------
+
+let pm: PmAnalyzer | null = null;
+let pmRendered = -1;
+const pmLimit = () => settings.pmLimMs / 1000;
+
+const fmtSec = (t: number) => (t < 1 ? `${Math.round(t * 1000)} мс` : `${t.toFixed(2).replace(".", ",")} с`);
+const fmtT20 = (n: PmNote) => (n.t20 === null ? "…" : `${n.t20Measured ? "" : "≈"}${fmtSec(n.t20)}`);
+const fmtAtt = (a: number | null) => (a === null ? "—" : `${(a * 1000).toFixed(a < 0.01 ? 1 : 0).replace(".", ",")} мс`);
+const median = (a: number[]) => {
+  if (!a.length) return null;
+  const s = [...a].sort((x, y) => x - y);
+  const m = s.length >> 1;
+  return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+};
+
+function drawPmMarks(g: CanvasRenderingContext2D, W: number, H: number, top: number, dpr: number, xOf: (t: number) => number) {
+  if (!pm) return;
+  const lim = pmLimit();
+  g.font = `600 ${11 * dpr}px "IBM Plex Mono", ui-monospace, monospace`;
+  g.textBaseline = "top";
+  for (const n of pm.notes) {
+    const t = n.start / sr;
+    if (t > viewStart + viewSpan) break;
+    const x = xOf(t);
+    const pmd = isPalmMuted(n, lim);
+    const c = pmd === null ? col.text : pmd ? col.play : col.clip;
+    const x20 = n.t20 === null ? null : xOf(t + n.t20);
+    if (x20 !== null && x20 < 0) continue;
+    g.fillStyle = c;
+    g.fillRect(Math.round(x), top, 2 * dpr, H - top);
+    if (x20 !== null) {
+      // Bracket from the attack to the −20 dB point.
+      const y = top + 22 * dpr;
+      g.globalAlpha = 0.35;
+      g.fillRect(x, y, Math.max(dpr, x20 - x), 3 * dpr);
+      g.globalAlpha = 1;
+      g.fillRect(Math.round(x20), y - 4 * dpr, dpr, 11 * dpr);
+    }
+    const label = `${pmd === null ? "" : pmd ? "PM " : "откр. "}${fmtT20(n)}`;
+    const tw = g.measureText(label).width;
+    if (x + 4 * dpr + tw > 0 && x < W) {
+      g.fillStyle = col.stage;
+      g.fillRect(x + 3 * dpr, top + 4 * dpr, tw + 6 * dpr, 15 * dpr);
+      g.fillStyle = c;
+      g.fillText(label, x + 6 * dpr, top + 6 * dpr);
+    }
+  }
+  g.textBaseline = "middle";
+}
+
+function renderPm() {
+  if (!pm) return;
+  pmRendered = pm.version;
+  const lim = pmLimit();
+  const notes = pm.notes;
+  const last = notes.at(-1);
+  const box = $("pm-verdict");
+  const pmd = last ? isPalmMuted(last, lim) : null;
+  box.dataset.state = !last ? "none" : pmd === null ? "none" : pmd ? "pm" : "open";
+  $("pm-badge").textContent = !last ? "—" : pmd === null ? "…" : pmd ? "PM" : "✕";
+  $("pm-v-title").textContent = !last
+    ? recording
+      ? "Сыграйте ноту"
+      : "Нажмите ● и сыграйте ноту"
+    : pmd === null
+      ? "Измеряю затухание…"
+      : pmd
+        ? "Palm mute"
+        : "Открытая нота — нет приглушения";
+  const parts: string[] = [];
+  if (last) {
+    parts.push(`затухание ${fmtT20(last)}`);
+    if (last.rate !== null) parts.push(`${Math.round(last.rate)} дБ/с`);
+    parts.push(`атака ${fmtAtt(last.attack)}`);
+    if (last.bright !== null) parts.push(`глухость ${Math.round((1 - last.bright) * 100)}%`);
+  }
+  $("pm-v-sub").textContent = parts.join(" · ");
+
+  const rated = notes.filter((n) => n.t20 !== null);
+  const pms = rated.filter((n) => n.t20! <= lim);
+  const opens = rated.filter((n) => n.t20! > lim);
+  $("pm-count").textContent = String(notes.length);
+  $("pm-share").textContent = rated.length ? `${Math.round((pms.length / rated.length) * 100)}%` : "—";
+  const mp = median(pms.map((n) => n.t20!));
+  const mo = median(opens.map((n) => n.t20!));
+  $("pm-t-pm").textContent = mp === null ? "—" : fmtSec(mp);
+  $("pm-t-open").textContent = mo === null ? "—" : fmtSec(mo);
+  $("pm-att").textContent = fmtAtt(median(notes.flatMap((n) => (n.attack === null ? [] : [n.attack]))));
+
+  const list = $("pm-list");
+  list.replaceChildren(
+    ...notes
+      .slice(-60)
+      .reverse()
+      .map((n) => {
+        const b = document.createElement("button");
+        const p = isPalmMuted(n, lim);
+        b.className = `pm-note ${p === null ? "" : p ? "pm" : "open"}`;
+        const t = n.start / sr;
+        const m = Math.floor(t / 60);
+        b.innerHTML = `<b>${p === null ? "…" : p ? "Palm mute" : "Открытая"}</b><span>${m}:${(t - m * 60).toFixed(2).padStart(5, "0")} · ${fmtT20(n)}</span><span>атака ${fmtAtt(n.attack)}${n.bright !== null ? ` · глух. ${Math.round((1 - n.bright) * 100)}%` : ""}</span>`;
+        b.addEventListener("click", () => {
+          follow = false;
+          viewSpan = Math.max(Math.min(viewSpan, 2), (n.t20 ?? 0.5) * 3);
+          viewStart = t - viewSpan * 0.2;
+          clampView();
+          setMarker(t);
+        });
+        return b;
+      }),
+  );
+}
+
+/** Palm mute is practised on a driven tone: the pedal goes on at full drive. */
+function pmTone() {
+  settings.mon.dist = true;
+  settings.mon.drive = 1;
+  monitorChanged();
+}
+
+function applyExercise() {
+  const isPm = settings.exercise === "pm";
+  $<HTMLSelectElement>("wv-ex").value = settings.exercise;
+  $("pm-card").hidden = !isPm;
+  $<HTMLInputElement>("pm-lim").value = String(settings.pmLimMs);
+  $("pm-lim-v").textContent = fmtSec(pmLimit());
+  pmRendered = -1;
+  if (isPm) renderPm();
+}
+
+$<HTMLSelectElement>("wv-ex").addEventListener("change", (e) => {
+  settings.exercise = (e.target as HTMLSelectElement).value as Settings["exercise"];
+  if (settings.exercise === "pm") pmTone();
+  saveSettings();
+  applyExercise();
+});
+$<HTMLInputElement>("pm-lim").addEventListener("input", (e) => {
+  settings.pmLimMs = Number((e.target as HTMLInputElement).value);
+  saveSettings();
+  applyExercise();
+});
+if (settings.exercise === "pm") pmTone();
+applyExercise();

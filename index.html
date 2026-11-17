@@ -210,6 +210,13 @@
       <div class="toolbar">
         <p class="lede">Волна сигнала с гитары в реальном времени. Запись — красной кнопкой или клавишей R (до 5 минут). Любой кусок можно растянуть до отдельных сэмплов.</p>
         <div class="controls">
+          <label class="field">
+            <span>Упражнение</span>
+            <select id="wv-ex">
+              <option value="free">Свободная запись</option>
+              <option value="pm">Palm mute</option>
+            </select>
+          </label>
           <button id="wv-start" class="btn">Включить аудиовход</button>
           <label class="field">
             <span>Вход</span>
@@ -257,6 +264,39 @@
             <span>Перетаскивание — прокрутка, двойной клик — вся запись</span>
           </p>
           <p id="wv-status" class="note" role="status">Вход выключен.</p>
+        </section>
+
+        <section id="pm-card" class="lg-card" hidden>
+          <div class="block-head">
+            <h3>Упражнение: palm mute</h3>
+            <span class="hint">ребро ладони на струнах у подставки, нота короткая и глухая · дисторшн включён на 100%</span>
+          </div>
+          <div class="pm-top">
+            <div id="pm-verdict" class="pm-verdict" data-state="none">
+              <span class="pm-badge" id="pm-badge">—</span>
+              <b id="pm-v-title">Нажмите ● и сыграйте ноту</b>
+              <span id="pm-v-sub" class="mono"></span>
+            </div>
+            <div class="wv-stats pm-stats">
+              <div><span>Нот</span><b id="pm-count" class="mono">0</b></div>
+              <div><span>С palm mute</span><b id="pm-share" class="mono">—</b></div>
+              <div><span>Затухание PM</span><b id="pm-t-pm" class="mono">—</b><small>до −20 дБ, медиана</small></div>
+              <div><span>Затухание открытых</span><b id="pm-t-open" class="mono">—</b><small>до −20 дБ, медиана</small></div>
+              <div><span>Атака</span><b id="pm-att" class="mono">—</b><small>касание → звук, медиана</small></div>
+            </div>
+          </div>
+          <label class="field pm-lim">
+            <span>Palm mute, если нота теряет 20 дБ быстрее, чем за <b id="pm-lim-v" class="mono"></b></span>
+            <input id="pm-lim" type="range" min="100" max="1000" step="10" />
+          </label>
+          <div id="pm-list" class="pm-list" aria-label="Сыгранные ноты"></div>
+          <p class="note">
+            Затухание — время, за которое громкость ноты падает на 20 дБ: у приглушённой ноты около 0,1–0,3 с, у открытой — секунда и больше.
+            «Глухость» — насколько срезаны верхние гармоники: у palm mute их почти нет.
+            Атака — от касания медиатором струны (первый шорох) до момента, когда нота зазвучала: чем короче, тем чётче удар.
+            Если приглушение слабое, нота звенит дольше границы — двиньте ладонь ближе к грифу или прижмите сильнее; если нота глохнет без высоты, ладонь слишком далеко от подставки.
+            Нажмите на ноту в списке, чтобы перейти к ней на волне.
+          </p>
         </section>
 
         <section class="lg-card">
