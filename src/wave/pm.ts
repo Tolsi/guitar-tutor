@@ -422,9 +422,10 @@ export class PmAnalyzer {
     const ringing = bg > peak * 0.12;
     let sound = -1;
     if (!ringing || peak >= bg * 1.12) {
-      // The note sounds once the level gets a fifth of the way from silence to the attack peak, or
+      // The note sounds once the level gets a third of the way from silence to the attack peak (the pick's
+      // own touch sound stays below that), or
       // halfway from the ringing (whose crests wander) to the peak.
-      const thr = ringing ? (bg + peak) / 2 : peak / 5;
+      const thr = ringing ? (bg + peak) / 2 : peak / 3;
       for (let b = near; b < nb; b++)
         if (a[b] >= thr) {
           sound = b;
@@ -436,25 +437,35 @@ export class PmAnalyzer {
       for (let b = near; b < nb; b++) if (h[b] > best) (best = h[b]), (sound = b);
     }
     if (sound < 4) return null;
+    // The pick touching the string is a small sound of its own before the note, often with a quieter
+    // stretch in between (the pick pressing the string). Take the earliest burst within 120 ms before
+    // the note that rises clearly above the background — after a quiet moment, so the previous note's
+    // tail does not count.
+    const win = Math.round(0.12 / (B / this.sr));
+    const lo = Math.max(0, sound - win);
+    const earliest = (x: Float32Array, thr: number) => {
+      let quiet = false;
+      for (let b = lo; b < sound - 1; b++) {
+        if (x[b] <= thr) quiet = true;
+        else if (quiet && x[b + 1] > thr) return b;
+      }
+      return -1;
+    };
     let touch = sound;
     if (!ringing) {
-      // Silence before: walk back while the signal stays clearly above it — that is the pick on the string.
-      const thr = Math.max(quietest(a, sound) * 2, 1e-4);
-      while (touch > 0 && a[touch - 1] > thr) touch--;
+      const thr = Math.max(quietest(a, sound) * 3, 1e-4);
+      const t = earliest(a, thr);
+      if (t >= 0) touch = t;
+      else while (touch > 0 && a[touch - 1] > thr) touch--;
     } else {
       // A ringing string hides the pick in the level, but not in the high frequencies: the pick
-      // scraping or stopping the string is a noise burst well above the ringing's own edges.
-      const lo = Math.max(0, near - 6 * span);
-      if (sound <= lo + span) return null;
-      const thr = quietest(h.subarray(lo, sound), sound - lo) * 2;
-      // Noise is ragged: step over dips shorter than 2 ms.
-      const gap = 4;
-      const hot = (b: number) => {
-        for (let j = Math.max(lo, b - gap); j < b; j++) if (h[j] > thr) return true;
-        return false;
-      };
-      while (touch > lo && hot(touch)) touch--;
-      if (touch === lo) return null;
+      // touching or stopping the string is a burst well above the ringing's own edges.
+      const lo2 = Math.max(0, sound - 2 * win);
+      if (sound <= lo2 + span) return null;
+      const thr = quietest(h.subarray(lo2, sound), sound - lo2) * 2.5;
+      const t = earliest(h, thr);
+      if (t < 0) return null;
+      touch = t;
     }
     n.touchAt = from + touch * B;
     n.soundAt = from + sound * B;
