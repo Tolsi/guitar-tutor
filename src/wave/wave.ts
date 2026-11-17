@@ -1626,6 +1626,31 @@ function drawPmMarks(
       v.state === "wait" ? col.text : v.state === "open" ? col.clip : v.state === "pm" && cleanAttack(v) ? col.play : col.warn;
     const x20 = n.t20 === null ? null : xOf(t + n.t20);
     if (x20 !== null && x20 < 0) continue;
+    if (n.touchAt !== null && n.soundAt !== null && n.soundAt > n.touchAt) {
+      // Attack: from the pick touching the string (dashed line) to the note sounding.
+      const xa = xOf((clip.pos + n.touchAt - clip.from) / sr), xs = xOf((clip.pos + n.soundAt - clip.from) / sr);
+      const ac = v.slowAttack ? col.warn : c;
+      g.fillStyle = ac;
+      g.globalAlpha = 0.16;
+      g.fillRect(xa, top, Math.max(dpr, xs - xa), bottom - top);
+      g.globalAlpha = 0.9;
+      g.strokeStyle = ac;
+      g.lineWidth = dpr;
+      g.setLineDash([3 * dpr, 3 * dpr]);
+      g.beginPath();
+      g.moveTo(Math.round(xa) + 0.5 * dpr, top);
+      g.lineTo(Math.round(xa) + 0.5 * dpr, bottom);
+      g.stroke();
+      g.setLineDash([]);
+      g.fillRect(Math.round(xs), bottom - 12 * dpr, dpr, 12 * dpr);
+      g.globalAlpha = 1;
+      const al = `${Math.round(n.attack! * 1000)} мс`;
+      const aw = g.measureText(al).width;
+      if (xs - xa > aw + 8 * dpr) {
+        g.fillStyle = ac;
+        g.fillText(al, (xa + xs - aw) / 2, bottom - 14 * dpr);
+      }
+    }
     g.fillStyle = c;
     g.fillRect(Math.round(x), top, 2 * dpr, bottom - top);
     if (x20 !== null) {

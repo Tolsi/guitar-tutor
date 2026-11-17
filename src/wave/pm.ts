@@ -42,6 +42,9 @@ export interface PmNote {
    * actually sounding (level reaching half of the attack peak).
    */
   attack: number | null;
+  /** Sample indices (in the take) of the pick touching the string and of the note sounding. */
+  touchAt: number | null;
+  soundAt: number | null;
   /** Seconds between two pick hits when the string was struck twice; null for a clean single attack. */
   doubleGap: number | null;
   /** Sample index of an earlier trigger this note was moved from (the pick stopping the string first). */
@@ -259,6 +262,8 @@ export class PmAnalyzer {
       f0: null,
       pitchClarity: null,
       attack: null,
+      touchAt: null,
+      soundAt: null,
       doubleGap: null,
       lead: null,
       doubleChecked: false,
@@ -451,6 +456,8 @@ export class PmAnalyzer {
       while (touch > lo && hot(touch)) touch--;
       if (touch === lo) return null;
     }
+    n.touchAt = from + touch * B;
+    n.soundAt = from + sound * B;
     return ((sound - touch) * B) / this.sr;
   }
 
