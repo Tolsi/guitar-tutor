@@ -58,7 +58,6 @@ interface Colors {
   axis: string;
   text: string;
   play: string;
-  marker: string;
 }
 function readColors(): Colors {
   const cs = getComputedStyle(document.documentElement);
@@ -71,7 +70,6 @@ function readColors(): Colors {
     axis: v("--scope-axis"),
     text: v("--scope-text"),
     play: v("--scope-play"),
-    marker: v("--scope-marker"),
   };
 }
 let col = readColors();
@@ -357,14 +355,9 @@ function drawWave() {
   const xOf = (t: number) => ((t - viewStart) / viewSpan) * W;
   if (marker !== null) {
     const x = Math.round(xOf(marker));
-    if (x >= -6 * dpr && x <= W + 6 * dpr) {
-      g.fillStyle = col.marker;
-      g.fillRect(x, top, 2 * dpr, H - top);
-      g.beginPath();
-      g.moveTo(x - 6 * dpr, top);
-      g.lineTo(x + 8 * dpr, top);
-      g.lineTo(x + dpr, top + 9 * dpr);
-      g.fill();
+    if (x >= 0 && x <= W) {
+      g.fillStyle = col.axis;
+      g.fillRect(x, top, dpr, H - top);
     }
   }
   const pos = playPos() ?? pausedAt;
@@ -376,10 +369,6 @@ function drawWave() {
       g.fillRect(Math.round(x), top, 2 * dpr, H - top);
       g.globalAlpha = 1;
     }
-  }
-  if (hoverX !== null) {
-    g.fillStyle = col.axis;
-    g.fillRect(Math.round(hoverX * dpr), top, dpr, H - top);
   }
 }
 
