@@ -18,7 +18,7 @@ interface Settings {
   channel: ChannelMode;
   /** Headphone monitoring through the amp; also used for playback. */
   monOn: boolean;
-  exercise: "free" | "pm";
+  exercise: "free" | "pm" | "pmopen";
   pmLimMs: number;
   attLimMs: number;
   bpm: number;
@@ -771,9 +771,9 @@ function drawWave() {
       const x0 = xOf(c.pos / sr), x1 = xOf(clipEnd(c) / sr);
       if (x1 < 0 || x0 > W) continue;
       drawClip(g, c, x0, x1, top + c.lane * laneH, laneH, W, dpr);
-      if (settings.exercise === "pm") {
+      if (pmEx()) {
         let ch = checks.get(c.take);
-        if (!ch) checks.set(c.take, (ch = checkPitches(c.take.pm.notes, pmLimit())));
+        if (!ch) checks.set(c.take, (ch = pitchChecks(c.take.pm.notes)));
         drawPmMarks(g, W, top + c.lane * laneH, laneH, dpr, xOf, c, ch);
       }
     }
@@ -950,7 +950,7 @@ function renderTime() {
 function loop() {
   if (!visible) return;
   renderTime();
-  if (settings.exercise === "pm" && tl) {
+  if (pmEx() && tl) {
     for (const t of tl.takes) t.pm.update(t.store);
     const ft = focusTake();
     const key = ft ? `${ft.id}:${ft.pm.version}` : "";
@@ -1533,6 +1533,11 @@ const median = (a: number[]) => {
   return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
 };
 
+/** Both palm-mute exercises; "pmopen" also checks the muted note keeps the open string's pitch. */
+const pmEx = () => settings.exercise !== "free";
+const pitchEx = () => settings.exercise === "pmopen";
+const pitchChecks = (notes: PmNote[]) => (pitchEx() ? checkPitches(notes, pmLimit()) : new Map<PmNote, PitchCheck>());
+
 type PmState = "wait" | "pm" | "open" | "nopitch" | "offpitch";
 interface PmVerdict {
   state: PmState;
@@ -1551,6 +1556,7 @@ function judgePm(n: PmNote, checks: Map<PmNote, PitchCheck>): PmVerdict {
   if (muted === null) return v("wait");
   if (!muted) return v("open");
   // The pitch is measured 15–60 ms after the attack; until then the note is still pending.
+  if (!pitchEx()) return v("pm");
   if (n.bright === null && n.pitchClarity === null) return v("wait");
   if (!pitch) return v("nopitch");
   return v(Math.abs(pitch.cents) <= PITCH_TOL ? "pm" : "offpitch");
@@ -1637,14 +1643,16 @@ function renderPm() {
   const take = focusTake();
   pmKey = take ? `${take.id}:${take.pm.version}` : "";
   const notes = take?.pm.notes ?? [];
-  const checks = checkPitches(notes, pmLimit());
+  const checks = pitchChecks(notes);
   const last = notes.at(-1);
   const box = $("pm-verdict");
   const v = last ? judgePm(last, checks) : null;
   const allGood = !!v && v.state === "pm" && cleanAttack(v);
   box.dataset.state = !v || v.state === "wait" ? "none" : allGood ? "pm" : v.state === "open" ? "open" : "warn";
   $("pm-badge").textContent = !v ? "—" : v.state === "wait" ? "…" : allGood ? "PM" : v.state === "open" ? "✕" : "!";
-  let title = !v ? (recording ? "Сыграйте ноту" : "Нажмите ● и сыграйте ноту") : STATE_TITLE[v.state];
+  let title = !v
+    ? recording ? "Сыграйте ноту" : `Нажмите ● и сыграйте ${pitchEx() ? "открытую струну" : "ноту"}`
+    : v.state === "pm" && !pitchEx() ? "Palm mute" : STATE_TITLE[v.state];
   if (v && v.state !== "wait") {
     const extra = [v.double ? "двойная атака" : "", v.slowAttack ? "долгая атака" : ""].filter(Boolean);
     if (extra.length) title += ` · ${extra.join(", ")}`;
@@ -1691,11 +1699,11 @@ function renderPm() {
         const clip = tl?.clips.find((c) => c.take === take && n.start >= c.from && n.start < c.to);
         const t = clip ? (clip.pos + n.start - clip.from) / sr : n.start / sr;
         const m = Math.floor(t / 60);
-        const pitch = j.pitch ? `${j.pitch.name.split(" ")[0]} ${fmtCents(j.pitch.cents)}` : "без высоты";
+        const pitch = !pitchEx() ? "" : j.pitch ? `${j.pitch.name.split(" ")[0]} ${fmtCents(j.pitch.cents)} · ` : "без высоты · ";
         b.innerHTML =
           `<b>${j.state === "wait" ? "…" : STATE_SHORT[j.state] === "PM" ? "Palm mute" : STATE_SHORT[j.state] === "откр." ? "Открытая" : STATE_SHORT[j.state]}</b>` +
           `<span>${m}:${(t - m * 60).toFixed(2).padStart(5, "0")} · ${fmtT20(n)}</span>` +
-          `<span>${pitch} · атака ${fmtAtt(n.attack)}${j.slowAttack ? " !" : ""}</span>` +
+          `<span>${pitch}атака ${fmtAtt(n.attack)}${j.slowAttack ? " !" : ""}</span>` +
           (j.double ? `<span class="pm-bad">двойная атака, ${Math.round(n.doubleGap! * 1000)} мс</span>` : "");
         b.disabled = !clip;
         b.addEventListener("click", () => {
@@ -1711,7 +1719,12 @@ function renderPm() {
 }
 
 function applyExercise() {
-  const isPm = settings.exercise === "pm";
+  const isPm = pmEx();
+  $("pm-pitch-tile").hidden = !pitchEx();
+  $("pm-title").textContent = pitchEx() ? "Упражнение: palm mute открытых струн" : "Упражнение: palm mute";
+  $("pm-sub").textContent = pitchEx()
+    ? "открытые струны с ребром ладони у подставки: нота глухая, но той же высоты, что и без приглушения"
+    : "ребро ладони на струнах у подставки, нота короткая и глухая";
   for (const el of document.querySelectorAll<HTMLElement>("[data-ex]"))
     el.setAttribute("aria-checked", String(el.dataset.ex === settings.exercise));
   $("pm-card").hidden = !isPm;
@@ -1733,7 +1746,7 @@ function pmTone() {
 
 function setExercise(ex: Settings["exercise"]) {
   settings.exercise = ex;
-  if (ex === "pm") pmTone();
+  if (ex !== "free") pmTone();
   saveSettings();
   applyExercise();
 }
@@ -1749,5 +1762,5 @@ $<HTMLInputElement>("pm-lim").addEventListener("input", (e) => {
   saveSettings();
   applyExercise();
 });
-if (settings.exercise === "pm") pmTone();
+if (pmEx()) pmTone();
 applyExercise();

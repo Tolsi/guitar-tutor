@@ -262,6 +262,7 @@
           <div class="menu-pop" role="menu">
             <button role="menuitemradio" data-ex="free" aria-checked="true">Свободная запись</button>
             <button role="menuitemradio" data-ex="pm" aria-checked="false">Palm mute</button>
+            <button role="menuitemradio" data-ex="pmopen" aria-checked="false">Palm mute открытых струн</button>
           </div>
         </div>
  <input id="ed-file" type="file" accept="audio/*,.wav,.mp3,.m4a,.ogg,.flac" multiple hidden />
@@ -376,8 +377,8 @@
 
         <section id="pm-card" class="lg-card" hidden>
           <div class="block-head">
-            <h3>Упражнение: palm mute</h3>
-            <span class="hint">ребро ладони на струнах у подставки, нота короткая и глухая · дисторшн «Дисторшн» на 100%</span>
+            <h3 id="pm-title">Упражнение: palm mute</h3>
+            <span class="hint"><span id="pm-sub">ребро ладони на струнах у подставки, нота короткая и глухая</span> · дисторшн «Дисторшн» на 100%</span>
           </div>
           <div class="pm-top">
             <div id="pm-verdict" class="pm-verdict" data-state="none">
@@ -389,7 +390,7 @@
             <div class="wv-stats pm-stats">
               <div><span>Нот</span><b id="pm-count" class="mono">0</b></div>
               <div><span>С palm mute</span><b id="pm-share" class="mono">—</b></div>
-              <div><span>Нота как у открытой</span><b id="pm-pitch" class="mono">—</b><small>из приглушённых, ±25 ц</small></div>
+              <div id="pm-pitch-tile"><span>Нота как у открытой</span><b id="pm-pitch" class="mono">—</b><small>из приглушённых, ±25 ц</small></div>
               <div><span>Затухание PM</span><b id="pm-t-pm" class="mono">—</b><small>до −20 дБ, медиана</small></div>
               <div><span>Затухание открытых</span><b id="pm-t-open" class="mono">—</b><small>до −20 дБ, медиана</small></div>
               <div><span>Атака</span><b id="pm-att" class="mono">—</b><small>касание → звук, медиана</small></div>
