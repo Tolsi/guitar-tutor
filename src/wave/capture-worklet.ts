@@ -135,3 +135,31 @@ class Capture extends AudioWorkletProcessor {
 }
 
 registerProcessor("wave-capture", Capture);
+
+/**
+ * Recorder: input 0 is the processed signal (after all effects), input 1 the clean guitar (after input
+ * gain and gate only). Both are posted together, block by block, so they stay aligned to the sample.
+ */
+class Tap extends AudioWorkletProcessor {
+  private wet = new Float32Array(BLOCK);
+  private dry = new Float32Array(BLOCK);
+  private n = 0;
+
+  process(inputs: Float32Array[][]) {
+    const w = inputs[0]?.[0], d = inputs[1]?.[0];
+    const len = w?.length ?? d?.length ?? 128;
+    for (let i = 0; i < len; i++) {
+      this.wet[this.n] = w ? w[i] : 0;
+      this.dry[this.n] = d ? d[i] : 0;
+      if (++this.n === BLOCK) {
+        this.port.postMessage({ wet: this.wet, dry: this.dry }, [this.wet.buffer, this.dry.buffer]);
+        this.wet = new Float32Array(BLOCK);
+        this.dry = new Float32Array(BLOCK);
+        this.n = 0;
+      }
+    }
+    return true;
+  }
+}
+
+registerProcessor("wave-tap", Tap);

@@ -7,6 +7,8 @@ export interface Take {
   id: number;
   name: string;
   store: SampleStore;
+  /** The clean guitar recorded alongside (before the effects), for analysis; absent for imported files. */
+  dry?: SampleStore;
   pm: PmAnalyzer;
 }
 
@@ -45,8 +47,8 @@ export class Timeline {
     return Math.max(1, n);
   }
 
-  newTake(name: string, store: SampleStore): Take {
-    const t: Take = { id: this.nextTake++, name, store, pm: new PmAnalyzer(this.sr) };
+  newTake(name: string, store: SampleStore, dry?: SampleStore): Take {
+    const t: Take = { id: this.nextTake++, name, store, dry, pm: new PmAnalyzer(this.sr) };
     this.takes.push(t);
     return t;
   }

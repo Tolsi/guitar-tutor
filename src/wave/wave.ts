@@ -81,6 +81,7 @@ let node: AudioWorkletNode | null = null;
 let tap: AudioWorkletNode | null = null;
 let tapFrom: AudioNode | null = null;
 let tl: Timeline | null = null;
+if (import.meta.env.DEV) (window as unknown as Record<string, unknown>).__wave = () => ({ tl });
 let sr = 48000;
 
 let visible = false;
@@ -229,11 +230,15 @@ function setInGain(db: number) {
   }
 }
 
-/** Blocks of the processed signal (after all effects): this is what gets recorded. */
-function onTapBlock(d: Float32Array) {
+/**
+ * Recorded blocks: the processed signal (after all effects) is what is shown, played and saved; the clean
+ * guitar beside it is what the exercise analysis listens to (distortion flattens attacks and pitch).
+ */
+function onTapBlock(wet: Float32Array, dry: Float32Array) {
   if (!recording || !rec) return;
   const st = rec.take.store;
-  st.push(d);
+  st.push(wet);
+  rec.take.dry?.push(dry);
   rec.clip.to = st.length;
   if (st.full) {
     setRecording(false);
@@ -245,12 +250,12 @@ function routeTap(from: AudioNode) {
   if (!tap) return;
   if (tapFrom) {
     try {
-      tapFrom.disconnect(tap);
+      tapFrom.disconnect(tap, 0, 0); // only the processed input: the clean one may come from the same node
     } catch {
       /* was not connected */
     }
   }
-  from.connect(tap);
+  from.connect(tap, 0, 0);
   tapFrom = from;
 }
 
@@ -268,18 +273,15 @@ async function ensureCtx() {
   ctx = c;
   sr = c.sampleRate;
   tl = new Timeline(sr);
-  tap = new AudioWorkletNode(c, "wave-capture", {
-    numberOfInputs: 1,
+  tap = new AudioWorkletNode(c, "wave-tap", {
+    numberOfInputs: 2,
     numberOfOutputs: 1,
     outputChannelCount: [1],
     channelCount: 1,
     channelCountMode: "explicit",
     channelInterpretation: "discrete",
   });
-  tap.port.postMessage({ mode: 0 });
-  tap.port.onmessage = (e: MessageEvent<Float32Array | ChannelReport>) => {
-    if (e.data instanceof Float32Array) onTapBlock(e.data);
-  };
+  tap.port.onmessage = (e: MessageEvent<{ wet: Float32Array; dry: Float32Array }>) => onTapBlock(e.data.wet, e.data.dry);
   const mute = c.createGain();
   mute.gain.value = 0;
   tap.connect(mute).connect(c.destination);
@@ -325,6 +327,8 @@ async function openInput() {
     const mute = c.createGain();
     mute.gain.value = 0;
     source.connect(node).connect(mute).connect(c.destination);
+    // The clean guitar goes to the recorder's second input, for the analysis.
+    if (tap) node.connect(tap, 0, 1);
     // The effect chain always runs (the headphone switch only mutes it); recording taps its output.
     if (monitor) {
       node.connect(monitor.input);
@@ -448,7 +452,7 @@ function setRecording(on: boolean) {
     // A new take starts at the marker (or the end); over existing audio it goes on a free lane.
     const pos = marker !== null ? Math.min(Math.round(marker * sr), tl.length) : tl.length;
     const lane = tl.freeLane(pos, MAX_SECONDS * sr);
-    const take = tl.newTake(`Дубль ${tl.takeCount + 1}`, new SampleStore(MAX_SECONDS * sr));
+    const take = tl.newTake(`Дубль ${tl.takeCount + 1}`, new SampleStore(MAX_SECONDS * sr), new SampleStore(MAX_SECONDS * sr));
     tl.checkpoint();
     rec = { take, clip: tl.addClip(take, 0, 0, pos, lane) };
     selClip = rec.clip;
@@ -951,7 +955,7 @@ function loop() {
   if (!visible) return;
   renderTime();
   if (pmEx() && tl) {
-    for (const t of tl.takes) t.pm.update(t.store);
+    for (const t of tl.takes) t.pm.update(t.dry ?? t.store);
     const ft = focusTake();
     const key = ft ? `${ft.id}:${ft.pm.version}` : "";
     if (key !== pmKey) renderPm();
@@ -1525,7 +1529,10 @@ const PITCH_TOL = 25;
 const fmtSec = (t: number) => (t < 1 ? `${Math.round(t * 1000)} мс` : `${t.toFixed(2).replace(".", ",")} с`);
 const fmtT20 = (n: PmNote) => (n.t20 === null ? "…" : `${n.t20Measured ? "" : "≈"}${fmtSec(n.t20)}`);
 const fmtAtt = (a: number | null) => (a === null ? "—" : `${(a * 1000).toFixed(a < 0.01 ? 1 : 0).replace(".", ",")} мс`);
-const fmtCents = (c: number) => `${c >= 0 ? "+" : "−"}${Math.abs(Math.round(c))} ц`;
+const fmtCents = (c: number) => {
+  const r = Math.round(c);
+  return `${r >= 0 ? "+" : "−"}${Math.abs(r)} ц`;
+};
 /** Nearest note and its deviation from equal temperament (A4 = 440 Hz), or "?" without a clear pitch. */
 const fmtNote = (n: PmNote) => {
   if (n.f0 === null) return n.pitchClarity === null ? "…" : "?";

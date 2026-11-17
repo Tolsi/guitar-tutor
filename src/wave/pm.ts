@@ -11,6 +11,8 @@ const ONSET_RISE_DB = 8;
 const ONSET_LOOKBACK = 8;
 const REFRACTORY = 16;
 const PEAK_SEARCH = 8;
+/** A second pick hit beats everything in the period before it by this energy ratio. */
+const DOUBLE_K = 2.5;
 /** Spectral-flux onsets: FFT size, compared frame lag (hops), bins up to this frequency. */
 const FLUX_N = 1024;
 const FLUX_LAG = 2;
@@ -42,6 +44,8 @@ export interface PmNote {
   attack: number | null;
   /** Seconds between two pick hits when the string was struck twice; null for a clean single attack. */
   doubleGap: number | null;
+  /** Sample index of an earlier trigger this note was moved from (the pick stopping the string first). */
+  lead: number | null;
   /** The double-attack check has run. */
   doubleChecked: boolean;
   /** The note has stopped changing: it decayed or the next one started. */
@@ -133,12 +137,26 @@ export class PmAnalyzer {
   }
 
   private detectOnset(k: number, store: SampleStore) {
-    if (k < ONSET_LOOKBACK || k - this.lastOnset < REFRACTORY) return;
+    if (k < ONSET_LOOKBACK) return;
     const e = this.env;
     if (e[k] < GATE_DB) return;
     let lo = Infinity;
     for (let j = k - ONSET_LOOKBACK; j <= k - 2; j++) lo = Math.min(lo, e[j]);
     if (e[k] - lo < ONSET_RISE_DB) return;
+    if (k - this.lastOnset < REFRACTORY) {
+      // The pick stopping a ringing string can trip the flux detector before the hit itself: a much
+      // louder attack right after moves the note to it (the pick time stays part of its attack).
+      const prev = this.notes.at(-1);
+      if (!prev || prev.done || e[k] < this.env[prev.start / this.hop] + 3) return;
+      let on = k;
+      while (on > k - ONSET_LOOKBACK && e[on - 1] > lo + 3) on--;
+      const moved = this.newNote(on);
+      moved.lead = prev.start;
+      this.notes[this.notes.length - 1] = moved;
+      this.lastOnset = k;
+      this.version++;
+      return;
+    }
     // A real attack also beats the level from before the dip; a brief dropout does not.
     let before = -Infinity;
     for (let j = Math.max(0, k - 24); j < k - ONSET_LOOKBACK; j++) before = Math.max(before, e[j]);
@@ -242,6 +260,7 @@ export class PmAnalyzer {
       pitchClarity: null,
       attack: null,
       doubleGap: null,
+      lead: null,
       doubleChecked: false,
       done: false,
     };
@@ -305,7 +324,8 @@ export class PmAnalyzer {
    */
   private doubleAttack(n: PmNote, store: SampleStore, endSample: number) {
     const sr = this.sr;
-    const from = Math.max(2, n.start - Math.round(sr * 0.005));
+    // From the earlier trigger too, if the note was moved: a first hit there is a double attack.
+    const from = Math.max(2, Math.min(n.lead ?? n.start, n.start) - Math.round(sr * 0.005));
     const to = Math.min(store.length, endSample, n.start + Math.round(sr * 0.1));
     if (to - from < sr * 0.03) return;
     n.doubleChecked = true;
@@ -322,9 +342,16 @@ export class PmAnalyzer {
       be[b] = ss;
     }
     // Main hit: the strongest burst in the first 35 ms (quiet pick scrape before it does not count).
-    const mainEnd = Math.min(nb, 40);
-    let p1 = 0;
-    for (let b = 0; b < mainEnd; b++) if (be[b] > be[p1]) p1 = b;
+    const mainEnd = Math.min(nb, Math.round((n.start - from) / blk) + 35);
+    // The burst lasts a few ms and wobbles; its start (first block within 3 dB of the loudest) is the hit.
+    let pmax = 0;
+    for (let b = 0; b < mainEnd; b++) if (be[b] > be[pmax]) pmax = b;
+    let p1 = pmax;
+    for (let b = 0; b < pmax; b++)
+      if (be[b] >= be[pmax] / 2) {
+        p1 = b;
+        break;
+      }
     // Another hit stands 6 dB above everything in the period before it — the note's own
     // once-per-period edges never do — and is within 12 dB of the main hit.
     const per = Math.ceil(period / blk) + 1;
@@ -332,7 +359,7 @@ export class PmAnalyzer {
       if (be[b] < be[p1] / 16) return false;
       let prevMax = 0;
       for (let j = Math.max(lo, b - per); j <= b - 1; j++) prevMax = Math.max(prevMax, be[j]);
-      return be[b] > 4 * prevMax;
+      return be[b] > DOUBLE_K * prevMax;
     };
     // A weaker hit before the main one…
     for (let b = 1; b <= p1 - 5; b++)
@@ -340,9 +367,10 @@ export class PmAnalyzer {
         n.doubleGap = ((p1 - b) * blk) / sr;
         return;
       }
-    // …or after it.
-    for (let b = p1 + 5; b < nb; b++)
-      if (isHit(b, p1 + 2)) {
+    // …or after it, from one period on: within the first period the window would miss the main hit's
+    // own repeat, and the excitation's ripples would pass for a hit.
+    for (let b = p1 + Math.max(5, per - 1); b < nb; b++)
+      if (isHit(b, 0)) {
         n.doubleGap = ((b - p1) * blk) / sr;
         return;
       }
@@ -411,7 +439,7 @@ export class PmAnalyzer {
     } else {
       // A ringing string hides the pick in the level, but not in the high frequencies: the pick
       // scraping or stopping the string is a noise burst well above the ringing's own edges.
-      const lo = Math.max(0, near - 4 * span);
+      const lo = Math.max(0, near - 6 * span);
       if (sound <= lo + span) return null;
       const thr = quietest(h.subarray(lo, sound), sound - lo) * 2;
       // Noise is ragged: step over dips shorter than 2 ms.
@@ -504,11 +532,16 @@ export class PmAnalyzer {
       if (!fc || share < 0.5 || total < 0.3 * post.reduce((q, v) => q + v, 0)) {
         plain();
         if (lag < 0) return;
+      } else if (best >= 0.6 && (plain(), lag > 0) && Math.abs(12 * Math.log2((fc * lag) / sr)) < 1.5) {
+        // The added partials point at the pitch the whole mix already has (the same string struck
+        // again): the autocorrelation measures it more precisely than 23 Hz spectrum bins.
       } else {
+        lag = -1;
         n.pitchClarity = share;
       const l0 = sr / fc;
       let bl = -1;
-      for (let l = Math.max(minLag + 1, Math.floor(l0 * 0.97)); l <= Math.min(maxLag, Math.ceil(l0 * 1.03)); l++)
+      // ±6 % (a semitone): the coarse pitch comes from spectrum bins 23 Hz apart and can sit on a skirt.
+      for (let l = Math.max(minLag + 1, Math.floor(l0 * 0.94)); l <= Math.min(maxLag, Math.ceil(l0 * 1.06)); l++)
         if (r[l] >= r[l - 1] && r[l] >= r[l + 1] && (bl < 0 || r[l] > r[bl])) bl = l;
         if (bl < 0 || r[bl] < 0.2) {
           n.f0 = fc;
