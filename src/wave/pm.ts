@@ -63,6 +63,8 @@ export class PmAnalyzer {
   frames = 0;
   notes: PmNote[] = [];
   private lastOnset = -1e9;
+  /** Notes whose pitch has been measured (once: the window is complete by then). */
+  private pitched = new WeakSet<PmNote>();
   /** Bumped whenever a note is added or changes. */
   version = 0;
 
@@ -288,7 +290,11 @@ export class PmAnalyzer {
       n.t20 = 20 / n.rate;
       n.t20Measured = false;
     }
-    if (n.bright === null && end - s >= 0.06 / HOP_S) this.spectrum(n, store);
+    // Pitch from just after the level peak: the pick noise before it has no pitch.
+    if (!this.pitched.has(n) && end - pk >= 0.06 / HOP_S) {
+      this.pitched.add(n);
+      this.spectrum(n, store, pk * H);
+    }
     if (!n.doubleChecked && (n.bright !== null || n.pitchClarity !== null)) this.doubleAttack(n, store, end * H);
     if (n.attack === null && end - s > PEAK_SEARCH) n.attack = this.attackTime(n, store, (pk + 1) * H);
   }
@@ -344,54 +350,90 @@ export class PmAnalyzer {
 
   private attackTime(n: PmNote, store: SampleStore, peakEnd: number) {
     const B = Math.max(8, Math.round(this.sr * 0.0005)); // 0.5 ms peak-hold blocks
-    const from = Math.max(0, n.start - Math.round(this.sr * 0.15));
+    const from = Math.max(2, n.start - Math.round(this.sr * 0.15));
     const to = Math.min(store.length, peakEnd);
     const nb = Math.floor((to - from) / B);
     if (nb < 8) return null;
-    const a = new Float32Array(nb);
+    // Peak amplitude and peak high-frequency content (second difference) per block.
+    const a = new Float32Array(nb), h = new Float32Array(nb);
     for (let b = 0; b < nb; b++) {
-      let m = 0;
-      for (let i = from + b * B, e = i + B; i < e; i++) m = Math.max(m, Math.abs(store.at(i)));
+      let m = 0, mh = 0;
+      for (let i = from + b * B, e = i + B; i < e; i++) {
+        const v = store.at(i);
+        m = Math.max(m, Math.abs(v));
+        mh = Math.max(mh, Math.abs(v - 2 * store.at(i - 1) + store.at(i - 2)));
+      }
       a[b] = m;
+      h[b] = mh;
     }
-    let peak = 0;
-    for (let b = 0; b < nb; b++) peak = Math.max(peak, a[b]);
-    // The note sounds once the level reaches a fifth of the attack peak (low enough that the
-    // first waveform crest, not the waveform phase, decides it).
-    let sound = -1;
     // Start near the detected attack so the previous note's tail is not taken for this one.
     const near = Math.max(0, Math.floor((n.start - from - this.sr * 0.015) / B));
-    for (let b = near; b < nb; b++)
-      if (a[b] >= peak / 5) {
-        sound = b;
-        break;
-      }
-    if (sound < 4) return null;
-    // Background: the quietest 10 ms stretch before that, then walk back from the note
-    // while the signal stays clearly above it — that is the pick on the string.
     const span = Math.max(4, Math.round(0.01 / (B / this.sr)));
-    let floor = Infinity;
-    for (let b = 0; b + span <= sound; b++) {
-      let m = 0;
-      for (let j = b; j < b + span; j++) m = Math.max(m, a[j]);
-      floor = Math.min(floor, m);
+    /** Quietest 10 ms stretch (by its loudest block) before block `end`. */
+    const quietest = (x: Float32Array, end: number) => {
+      let q = Infinity;
+      for (let b = 0; b + span <= end; b++) {
+        let m = 0;
+        for (let j = b; j < b + span; j++) m = Math.max(m, x[j]);
+        q = Math.min(q, m);
+      }
+      return isFinite(q) ? q : x[0];
+    };
+    let peak = 0;
+    for (let b = near; b < nb; b++) peak = Math.max(peak, a[b]);
+    // Background just before the hit: silence, or the previous note still ringing. 13 ms covers a whole
+    // low-E period, so the ringing's crests are all in it.
+    const per = Math.round(0.013 / (B / this.sr));
+    let bg = 0;
+    for (let b = Math.max(0, near - per); b < near; b++) bg = Math.max(bg, a[b]);
+    const ringing = bg > peak * 0.12;
+    let sound = -1;
+    if (!ringing || peak >= bg * 1.12) {
+      // The note sounds once the level gets a fifth of the way from silence to the attack peak, or
+      // halfway from the ringing (whose crests wander) to the peak.
+      const thr = ringing ? (bg + peak) / 2 : peak / 5;
+      for (let b = near; b < nb; b++)
+        if (a[b] >= thr) {
+          sound = b;
+          break;
+        }
+    } else {
+      // Distortion holds the level flat: the new note shows as the sharpest high-frequency burst instead.
+      let best = 0;
+      for (let b = near; b < nb; b++) if (h[b] > best) (best = h[b]), (sound = b);
     }
-    if (!isFinite(floor)) floor = a[0];
-    // The previous note is still ringing loudly: the pick noise is buried under it.
-    if (floor > peak * 0.12) return null;
-    const thr = Math.max(floor * 2, 1e-4);
+    if (sound < 4) return null;
     let touch = sound;
-    while (touch > 0 && a[touch - 1] > thr) touch--;
+    if (!ringing) {
+      // Silence before: walk back while the signal stays clearly above it — that is the pick on the string.
+      const thr = Math.max(quietest(a, sound) * 2, 1e-4);
+      while (touch > 0 && a[touch - 1] > thr) touch--;
+    } else {
+      // A ringing string hides the pick in the level, but not in the high frequencies: the pick
+      // scraping or stopping the string is a noise burst well above the ringing's own edges.
+      const lo = Math.max(0, near - 4 * span);
+      if (sound <= lo + span) return null;
+      const thr = quietest(h.subarray(lo, sound), sound - lo) * 2;
+      // Noise is ragged: step over dips shorter than 2 ms.
+      const gap = 4;
+      const hot = (b: number) => {
+        for (let j = Math.max(lo, b - gap); j < b; j++) if (h[j] > thr) return true;
+        return false;
+      };
+      while (touch > lo && hot(touch)) touch--;
+      if (touch === lo) return null;
+    }
     return ((sound - touch) * B) / this.sr;
   }
 
-  private spectrum(n: PmNote, store: SampleStore) {
+  private spectrum(n: PmNote, store: SampleStore, peakAt: number) {
     const N = 2048;
-    const from = n.start + Math.round(this.sr * 0.015);
+    const sr = this.sr;
+    const from = peakAt + Math.round(sr * 0.01);
     if (from + N > store.length) return;
     const x = store.slice(from, from + N);
-    // f0 by normalized autocorrelation, 70–1000 Hz.
-    const minLag = Math.floor(this.sr / 1000), maxLag = Math.min(Math.ceil(this.sr / 70), N / 2);
+    // Normalized autocorrelation, 70–1000 Hz.
+    const minLag = Math.floor(sr / 1000), maxLag = Math.min(Math.ceil(sr / 70), N / 2);
     let e0 = 0;
     for (let i = 0; i < N / 2; i++) e0 += x[i] * x[i];
     const r = new Float64Array(maxLag + 2);
@@ -402,28 +444,107 @@ export class PmAnalyzer {
       r[lag] = c / Math.sqrt(e0 * el + 1e-12);
       if (lag <= maxLag) best = Math.max(best, r[lag]);
     }
-    n.pitchClarity = best;
-    if (best < 0.6) return;
-    // The first strong peak, not the best one: later peaks are period multiples (an octave down).
+    const post = this.magnitudes(x);
+    // What was already sounding just before the hit (other strings, or this one still ringing).
+    const preFrom = n.start - N - Math.round(sr * 0.003);
+    const pre = preFrom >= 0 ? this.magnitudes(store.slice(preFrom, preFrom + N)) : null;
+    let ePost = 0, ePre = 0;
+    for (let b = 1; b < post.length; b++) (ePost += post[b] ** 2), (ePre += pre ? pre[b] ** 2 : 0);
+    const ringing = ePre > ePost * 0.05;
+
     let lag = -1;
-    for (let l = minLag + 1; l <= maxLag; l++)
-      if (r[l] >= 0.9 * best && r[l] >= r[l - 1] && r[l] >= r[l + 1]) {
-        lag = l;
-        break;
+    const plain = () => {
+      n.pitchClarity = best;
+      if (best < 0.6) return;
+      // The first strong peak, not the best one: later peaks are period multiples (an octave down).
+      for (let l = minLag + 1; l <= maxLag; l++)
+        if (r[l] >= 0.9 * best && r[l] >= r[l - 1] && r[l] >= r[l + 1]) {
+          lag = l;
+          break;
+        }
+    };
+    if (!ringing) plain();
+    else {
+      // Over a ringing background the autocorrelation hears the whole mix. Take what the hit added to
+      // the spectrum, find the pitch whose harmonics hold most of it, then refine on the autocorrelation.
+      const d = post.map((v, b) => Math.max(0, v - (pre ? pre[b] * 1.1 : 0)));
+      const binHz = sr / N;
+      const at = (f: number) => {
+        const p = f / binHz, i = Math.floor(p);
+        return i + 1 < d.length ? d[i] + (d[i + 1] - d[i]) * (p - i) : 0;
+      };
+      let fc = 0, sc = 0, total = 0;
+      for (let b = 1; b < d.length; b++) total += d[b];
+      // Subharmonic summation over all harmonics up to 5 kHz (compressed, so one loud partial does
+      // not decide): the true pitch collects every harmonic, a multiple of it only some.
+      for (let c = 0; c <= 1600; c++) {
+        const f = 70 * 2 ** (c / 400); // 3-cent steps, 70 Hz – 1.1 kHz
+        let v = 0;
+        for (let k = 1, w = 1; k * f < 5000; k++, w *= 0.92) v += Math.sqrt(at(f * k)) * w;
+        if (v > sc) (sc = v), (fc = f);
       }
+      // Most of what changed must sit on this note's harmonics, or there is no clear new pitch.
+      const on = new Uint8Array(d.length);
+      for (let k = 1; k * fc < 5000; k++) {
+        const c = Math.round((fc * k) / binHz);
+        for (let b = Math.max(0, c - 2); b <= Math.min(d.length - 1, c + 2); b++) on[b] = 1;
+      }
+      // Count only clear spectral peaks of what was added; the low broadband rest is noise and leakage.
+      let dMax = 0;
+      for (let b = 1; b < d.length; b++) dMax = Math.max(dMax, d[b]);
+      let onH = 0, peaks = 0;
+      for (let b = 1; b < d.length; b++)
+        if (d[b] > dMax * 0.1) {
+          peaks += d[b];
+          if (on[b]) onH += d[b];
+        }
+      const share = peaks > 0 ? onH / peaks : 0;
+      // The hit added little of its own (the same string struck again about as hard): the mix is
+      // dominated by this string anyway, so the plain autocorrelation is right.
+      if (!fc || share < 0.5 || total < 0.3 * post.reduce((q, v) => q + v, 0)) {
+        plain();
+        if (lag < 0) return;
+      } else {
+        n.pitchClarity = share;
+      const l0 = sr / fc;
+      let bl = -1;
+      for (let l = Math.max(minLag + 1, Math.floor(l0 * 0.97)); l <= Math.min(maxLag, Math.ceil(l0 * 1.03)); l++)
+        if (r[l] >= r[l - 1] && r[l] >= r[l + 1] && (bl < 0 || r[l] > r[bl])) bl = l;
+        if (bl < 0 || r[bl] < 0.2) {
+          n.f0 = fc;
+          this.bright(n, post);
+          return;
+        }
+        lag = bl;
+      }
+    }
     if (lag < 0) return;
     const a = r[lag - 1], b = r[lag], c = r[lag + 1];
     const den = a - 2 * b + c;
     const shift = den !== 0 ? Math.max(-0.5, Math.min(0.5, (0.5 * (a - c)) / den)) : 0;
-    n.f0 = this.sr / (lag + shift);
+    n.f0 = sr / (lag + shift);
+    this.bright(n, post);
+  }
+
+  /** Hann-windowed magnitude spectrum up to 8 kHz. */
+  private magnitudes(x: Float32Array) {
+    const N = x.length;
     const re = new Float64Array(N), im = new Float64Array(N);
     for (let i = 0; i < N; i++) re[i] = x[i] * (0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (N - 1)));
     fft(re, im);
-    const binHz = this.sr / N;
-    const cut = (3.5 * n.f0) / binHz, lowCut = (0.5 * n.f0) / binHz, top = 8000 / binHz;
+    const top = Math.min(N / 2, Math.ceil((8000 * N) / this.sr));
+    const m = new Float64Array(top);
+    for (let b = 0; b < top; b++) m[b] = Math.hypot(re[b], im[b]);
+    return m;
+  }
+
+  /** Share of spectral energy above 3.5 × f0. */
+  private bright(n: PmNote, mag: Float64Array) {
+    const binHz = this.sr / 2048;
+    const cut = (3.5 * n.f0!) / binHz, lowCut = (0.5 * n.f0!) / binHz;
     let total = 0, high = 0;
-    for (let b = Math.ceil(lowCut); b < Math.min(N / 2, top); b++) {
-      const p = re[b] * re[b] + im[b] * im[b];
+    for (let b = Math.ceil(lowCut); b < mag.length; b++) {
+      const p = mag[b] * mag[b];
       total += p;
       if (b >= cut) high += p;
     }
@@ -480,6 +601,14 @@ export interface PitchCheck {
 }
 
 const midiOf = (f: number, a4: number) => 69 + 12 * Math.log2(f / a4);
+
+const NOTE_NAMES = ["C", "C♯", "D", "D♯", "E", "F", "F♯", "G", "G♯", "A", "A♯", "B"];
+/** Nearest equal-tempered note and the deviation from it in cents. */
+export function noteOf(f: number, a4 = 440) {
+  const m = midiOf(f, a4);
+  const r = Math.round(m);
+  return { name: `${NOTE_NAMES[((r % 12) + 12) % 12]}${Math.floor(r / 12) - 1}`, cents: (m - r) * 100 };
+}
 
 /**
  * Compares each note's pitch with the open string it belongs to. The reference is the median pitch of

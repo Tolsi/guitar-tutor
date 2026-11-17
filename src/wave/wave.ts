@@ -1,7 +1,7 @@
 import workletUrl from "./capture-worklet.ts?worker&url";
 import { SampleStore } from "./store";
 import type { ChannelMode } from "./capture-worklet";
-import { checkPitches, isPalmMuted, type PitchCheck, type PmNote } from "./pm";
+import { checkPitches, isPalmMuted, noteOf, type PitchCheck, type PmNote } from "./pm";
 import { AMPS, MONITOR_DEFAULTS, Monitor, type DistType, type MonitorSettings } from "./monitor";
 import { Timeline, clipEnd, encodeWav, type Clip, type Take } from "./timeline";
 
@@ -1526,6 +1526,12 @@ const fmtSec = (t: number) => (t < 1 ? `${Math.round(t * 1000)} мс` : `${t.toF
 const fmtT20 = (n: PmNote) => (n.t20 === null ? "…" : `${n.t20Measured ? "" : "≈"}${fmtSec(n.t20)}`);
 const fmtAtt = (a: number | null) => (a === null ? "—" : `${(a * 1000).toFixed(a < 0.01 ? 1 : 0).replace(".", ",")} мс`);
 const fmtCents = (c: number) => `${c >= 0 ? "+" : "−"}${Math.abs(Math.round(c))} ц`;
+/** Nearest note and its deviation from equal temperament (A4 = 440 Hz), or "?" without a clear pitch. */
+const fmtNote = (n: PmNote) => {
+  if (n.f0 === null) return n.pitchClarity === null ? "…" : "?";
+  const { name, cents } = noteOf(n.f0);
+  return `${name} ${fmtCents(cents)}`;
+};
 const median = (a: number[]) => {
   if (!a.length) return null;
   const s = [...a].sort((x, y) => x - y);
@@ -1623,8 +1629,8 @@ function drawPmMarks(
       g.globalAlpha = 1;
       g.fillRect(Math.round(x20), y - 4 * dpr, dpr, 11 * dpr);
     }
-    let label = `${STATE_SHORT[v.state]} ${fmtT20(n)}`;
-    if (v.pitch && v.state !== "wait") label += ` ${fmtCents(v.pitch.cents)}`;
+    let label = `${STATE_SHORT[v.state]} ${fmtNote(n)} ${fmtT20(n)}`;
+    if (v.pitch && v.state !== "wait") label += ` стр.${fmtCents(v.pitch.cents)}`;
     if (v.double) label += " ×2";
     if (v.slowAttack) label += ` ат.${Math.round(n.attack! * 1000)}`;
     const tw = g.measureText(label).width;
@@ -1660,7 +1666,8 @@ function renderPm() {
   $("pm-v-title").textContent = title;
   const parts: string[] = [];
   if (last && v) {
-    if (v.pitch) parts.push(`струна ${v.pitch.name} ${fmtCents(v.pitch.cents)}${v.pitch.measuredRef ? "" : " от строя"}`);
+    parts.push(`нота ${fmtNote(last)}`);
+    if (v.pitch) parts.push(`от струны ${v.pitch.name} ${fmtCents(v.pitch.cents)}${v.pitch.measuredRef ? "" : " (от строя)"}`);
     parts.push(`затухание ${fmtT20(last)}`);
     if (last.rate !== null) parts.push(`${Math.round(last.rate)} дБ/с`);
     parts.push(`атака ${fmtAtt(last.attack)}`);
@@ -1699,7 +1706,8 @@ function renderPm() {
         const clip = tl?.clips.find((c) => c.take === take && n.start >= c.from && n.start < c.to);
         const t = clip ? (clip.pos + n.start - clip.from) / sr : n.start / sr;
         const m = Math.floor(t / 60);
-        const pitch = !pitchEx() ? "" : j.pitch ? `${j.pitch.name.split(" ")[0]} ${fmtCents(j.pitch.cents)} · ` : "без высоты · ";
+        const pitch =
+          fmtNote(n) + (pitchEx() && j.pitch ? ` (от ${j.pitch.name.split(" ")[0]} ${fmtCents(j.pitch.cents)})` : "") + " · ";
         b.innerHTML =
           `<b>${j.state === "wait" ? "…" : STATE_SHORT[j.state] === "PM" ? "Palm mute" : STATE_SHORT[j.state] === "откр." ? "Открытая" : STATE_SHORT[j.state]}</b>` +
           `<span>${m}:${(t - m * 60).toFixed(2).padStart(5, "0")} · ${fmtT20(n)}</span>` +
