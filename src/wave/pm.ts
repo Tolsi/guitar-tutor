@@ -24,11 +24,17 @@ export interface PmNote {
   /** Share of spectral energy above the 3rd harmonic, 0..1. */
   bright: number | null;
   f0: number | null;
+  /** Peak of the normalized autocorrelation: near 1 for a clear pitch, low when the note is just a thud. */
+  pitchClarity: number | null;
   /**
    * Seconds from the pick touching the string (first rise above the background) to the note
    * actually sounding (level reaching half of the attack peak).
    */
   attack: number | null;
+  /** Seconds between two pick hits when the string was struck twice; null for a clean single attack. */
+  doubleGap: number | null;
+  /** The double-attack check has run. */
+  doubleChecked: boolean;
   /** The note has stopped changing: it decayed or the next one started. */
   done: boolean;
 }
@@ -109,12 +115,39 @@ export class PmAnalyzer {
     while (on > k - ONSET_LOOKBACK && e[on - 1] > lo + 3) on--;
     this.lastOnset = k;
     const prev = this.notes.at(-1);
+    // Pick noise before a slow attack can trip the detector on its own: a much quieter "note" just
+    // before this one is the start of this attack, not a note.
+    if (prev && k - prev.start / this.hop < 0.15 / HOP_S && prev.peakDb < e[k] - 10) {
+      this.notes.pop();
+      this.version++;
+      const before = this.notes.at(-1);
+      if (before && !before.done) this.measure(before, this.notes.length - 1, store, on);
+      this.notes.push(this.newNote(on));
+      return;
+    }
     if (prev && !prev.done) {
       this.measure(prev, this.notes.length - 1, store, on);
       prev.done = true;
     }
-    this.notes.push({ start: on * this.hop, peakDb: e[k], t20: null, t20Measured: false, rate: null, bright: null, f0: null, attack: null, done: false });
+    this.notes.push(this.newNote(on));
     if (this.notes.length > 2000) this.notes.shift();
+  }
+
+  private newNote(frame: number): PmNote {
+    return {
+      start: frame * this.hop,
+      peakDb: this.env[frame],
+      t20: null,
+      t20Measured: false,
+      rate: null,
+      bright: null,
+      f0: null,
+      pitchClarity: null,
+      attack: null,
+      doubleGap: null,
+      doubleChecked: false,
+      done: false,
+    };
   }
 
   /** endFrame: the next note's attack, if known. */
@@ -161,12 +194,62 @@ export class PmAnalyzer {
       n.t20Measured = false;
     }
     if (n.bright === null && end - s >= 0.06 / HOP_S) this.spectrum(n, store);
+    if (!n.doubleChecked && (n.bright !== null || n.pitchClarity !== null)) this.doubleAttack(n, store, end * H);
     if (n.attack === null && end - s > PEAK_SEARCH) n.attack = this.attackTime(n, store, (pk + 1) * H);
+  }
+
+  /**
+   * A pick hit is a burst of high frequencies. Two bursts in a row within ~80 ms mean the pick struck the
+   * string twice. A burst only counts if it clearly beats the note's own periodic edges.
+   */
+  private doubleAttack(n: PmNote, store: SampleStore, endSample: number) {
+    const sr = this.sr;
+    const from = Math.max(2, n.start - Math.round(sr * 0.005));
+    const to = Math.min(store.length, endSample, n.start + Math.round(sr * 0.1));
+    if (to - from < sr * 0.03) return;
+    n.doubleChecked = true;
+    const blk = Math.round(sr * 0.001);
+    const period = n.f0 ? sr / n.f0 : sr * 0.012;
+    const nb = Math.floor((to - from) / blk);
+    const be = new Float64Array(nb);
+    for (let b = 0; b < nb; b++) {
+      let ss = 0;
+      for (let i = from + b * blk, e = i + blk; i < e; i++) {
+        const h = store.at(i) - 2 * store.at(i - 1) + store.at(i - 2);
+        ss += h * h;
+      }
+      be[b] = ss;
+    }
+    // Main hit: the strongest burst in the first 35 ms (quiet pick scrape before it does not count).
+    const mainEnd = Math.min(nb, 40);
+    let p1 = 0;
+    for (let b = 0; b < mainEnd; b++) if (be[b] > be[p1]) p1 = b;
+    // Another hit stands 6 dB above everything in the period before it — the note's own
+    // once-per-period edges never do — and is within 12 dB of the main hit.
+    const per = Math.ceil(period / blk) + 1;
+    const isHit = (b: number, lo: number) => {
+      if (be[b] < be[p1] / 16) return false;
+      let prevMax = 0;
+      for (let j = Math.max(lo, b - per); j <= b - 1; j++) prevMax = Math.max(prevMax, be[j]);
+      return be[b] > 4 * prevMax;
+    };
+    // A weaker hit before the main one…
+    for (let b = 1; b <= p1 - 5; b++)
+      if (isHit(b, 0)) {
+        n.doubleGap = ((p1 - b) * blk) / sr;
+        return;
+      }
+    // …or after it.
+    for (let b = p1 + 5; b < nb; b++)
+      if (isHit(b, p1 + 2)) {
+        n.doubleGap = ((b - p1) * blk) / sr;
+        return;
+      }
   }
 
   private attackTime(n: PmNote, store: SampleStore, peakEnd: number) {
     const B = Math.max(8, Math.round(this.sr * 0.0005)); // 0.5 ms peak-hold blocks
-    const from = Math.max(0, n.start - Math.round(this.sr * 0.08));
+    const from = Math.max(0, n.start - Math.round(this.sr * 0.15));
     const to = Math.min(store.length, peakEnd);
     const nb = Math.floor((to - from) / B);
     if (nb < 8) return null;
@@ -209,22 +292,35 @@ export class PmAnalyzer {
 
   private spectrum(n: PmNote, store: SampleStore) {
     const N = 2048;
-    const from = n.start + Math.round(this.sr * 0.01);
+    const from = n.start + Math.round(this.sr * 0.015);
     if (from + N > store.length) return;
     const x = store.slice(from, from + N);
     // f0 by normalized autocorrelation, 70–1000 Hz.
     const minLag = Math.floor(this.sr / 1000), maxLag = Math.min(Math.ceil(this.sr / 70), N / 2);
     let e0 = 0;
     for (let i = 0; i < N / 2; i++) e0 += x[i] * x[i];
-    let best = 0, bestLag = 0;
-    for (let lag = minLag; lag <= maxLag; lag++) {
+    const r = new Float64Array(maxLag + 2);
+    let best = 0;
+    for (let lag = minLag; lag <= maxLag + 1; lag++) {
       let c = 0, el = 0;
       for (let i = 0; i < N / 2; i++) (c += x[i] * x[i + lag]), (el += x[i + lag] * x[i + lag]);
-      const r = c / Math.sqrt(e0 * el + 1e-12);
-      if (r > best) (best = r), (bestLag = lag);
+      r[lag] = c / Math.sqrt(e0 * el + 1e-12);
+      if (lag <= maxLag) best = Math.max(best, r[lag]);
     }
-    if (best < 0.5 || !bestLag) return;
-    n.f0 = this.sr / bestLag;
+    n.pitchClarity = best;
+    if (best < 0.6) return;
+    // The first strong peak, not the best one: later peaks are period multiples (an octave down).
+    let lag = -1;
+    for (let l = minLag + 1; l <= maxLag; l++)
+      if (r[l] >= 0.9 * best && r[l] >= r[l - 1] && r[l] >= r[l + 1]) {
+        lag = l;
+        break;
+      }
+    if (lag < 0) return;
+    const a = r[lag - 1], b = r[lag], c = r[lag + 1];
+    const den = a - 2 * b + c;
+    const shift = den !== 0 ? Math.max(-0.5, Math.min(0.5, (0.5 * (a - c)) / den)) : 0;
+    n.f0 = this.sr / (lag + shift);
     const re = new Float64Array(N), im = new Float64Array(N);
     for (let i = 0; i < N; i++) re[i] = x[i] * (0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (N - 1)));
     fft(re, im);
@@ -273,3 +369,50 @@ function fft(re: Float64Array, im: Float64Array) {
 
 /** Palm mute when the note loses 20 dB faster than limitS. */
 export const isPalmMuted = (n: PmNote, limitS: number) => (n.t20 === null ? null : n.t20 <= limitS);
+
+/** Open strings in standard tuning, as MIDI numbers: E2 A2 D3 G3 B3 E4. */
+export const OPEN_STRINGS = [40, 45, 50, 55, 59, 64];
+const STRING_NAMES = ["E2 (6-я)", "A2 (5-я)", "D3 (4-я)", "G3 (3-я)", "B3 (2-я)", "E4 (1-я)"];
+
+export interface PitchCheck {
+  /** Index into OPEN_STRINGS. */
+  string: number;
+  name: string;
+  /** Deviation from the open string, cents. */
+  cents: number;
+  /** The reference came from open notes actually played on that string (rather than standard tuning). */
+  measuredRef: boolean;
+}
+
+const midiOf = (f: number, a4: number) => 69 + 12 * Math.log2(f / a4);
+
+/**
+ * Compares each note's pitch with the open string it belongs to. The reference is the median pitch of
+ * the open (not muted) notes played on that string, so a guitar tuned a little off is not penalised.
+ */
+export function checkPitches(notes: PmNote[], limitS: number, a4 = 440): Map<PmNote, PitchCheck> {
+  const nearest = (f: number) => {
+    const m = midiOf(f, a4);
+    let bi = 0;
+    for (let i = 1; i < OPEN_STRINGS.length; i++) if (Math.abs(m - OPEN_STRINGS[i]) < Math.abs(m - OPEN_STRINGS[bi])) bi = i;
+    return bi;
+  };
+  const refs: number[][] = OPEN_STRINGS.map(() => []);
+  for (const n of notes) {
+    if (n.f0 === null || isPalmMuted(n, limitS) !== false) continue;
+    const i = nearest(n.f0);
+    if (Math.abs(midiOf(n.f0, a4) - OPEN_STRINGS[i]) < 0.6) refs[i].push(n.f0);
+  }
+  const ref = refs.map((r, i) => {
+    if (!r.length) return { f: a4 * 2 ** ((OPEN_STRINGS[i] - 69) / 12), measured: false };
+    const s = [...r].sort((x, y) => x - y);
+    return { f: s[s.length >> 1], measured: true };
+  });
+  const out = new Map<PmNote, PitchCheck>();
+  for (const n of notes) {
+    if (n.f0 === null) continue;
+    const i = nearest(n.f0);
+    out.set(n, { string: i, name: STRING_NAMES[i], cents: 1200 * Math.log2(n.f0 / ref[i].f), measuredRef: ref[i].measured });
+  }
+  return out;
+}

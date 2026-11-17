@@ -1,6 +1,6 @@
 import workletUrl from "./capture-worklet.ts?worker&url";
 import { SampleStore } from "./store";
-import { PmAnalyzer, isPalmMuted, type PmNote } from "./pm";
+import { PmAnalyzer, checkPitches, isPalmMuted, type PitchCheck, type PmNote } from "./pm";
 import { AMPS, MONITOR_DEFAULTS, Monitor, type DistType, type MonitorSettings } from "./monitor";
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -13,10 +13,11 @@ interface Settings {
   outId: string;
   exercise: "free" | "pm";
   pmLimMs: number;
+  attLimMs: number;
   mon: MonitorSettings;
 }
 function loadSettings(): Settings {
-  const def = (): Settings => ({ deviceId: "", outId: "", exercise: "free", pmLimMs: 350, mon: { ...MONITOR_DEFAULTS } });
+  const def = (): Settings => ({ deviceId: "", outId: "", exercise: "free", pmLimMs: 350, attLimMs: 40, mon: { ...MONITOR_DEFAULTS } });
   try {
     const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? "{}");
     const d = def();
@@ -69,6 +70,7 @@ interface Colors {
   axis: string;
   text: string;
   play: string;
+  warn: string;
 }
 function readColors(): Colors {
   const cs = getComputedStyle(document.documentElement);
@@ -81,6 +83,7 @@ function readColors(): Colors {
     axis: v("--scope-axis"),
     text: v("--scope-text"),
     play: v("--scope-play"),
+    warn: v("--scope-warn"),
   };
 }
 let col = readColors();
@@ -836,10 +839,14 @@ renderMonitorControls();
 let pm: PmAnalyzer | null = null;
 let pmRendered = -1;
 const pmLimit = () => settings.pmLimMs / 1000;
+const attLimit = () => settings.attLimMs / 1000;
+/** A palm-muted note may sit this far from the open string and still count as the same note. */
+const PITCH_TOL = 25;
 
 const fmtSec = (t: number) => (t < 1 ? `${Math.round(t * 1000)} мс` : `${t.toFixed(2).replace(".", ",")} с`);
 const fmtT20 = (n: PmNote) => (n.t20 === null ? "…" : `${n.t20Measured ? "" : "≈"}${fmtSec(n.t20)}`);
 const fmtAtt = (a: number | null) => (a === null ? "—" : `${(a * 1000).toFixed(a < 0.01 ? 1 : 0).replace(".", ",")} мс`);
+const fmtCents = (c: number) => `${c >= 0 ? "+" : "−"}${Math.abs(Math.round(c))} ц`;
 const median = (a: number[]) => {
   if (!a.length) return null;
   const s = [...a].sort((x, y) => x - y);
@@ -847,17 +854,64 @@ const median = (a: number[]) => {
   return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
 };
 
+type PmState = "wait" | "pm" | "open" | "nopitch" | "offpitch";
+interface PmVerdict {
+  state: PmState;
+  pitch: PitchCheck | null;
+  /** Problems with the pick attack, independent of the mute. */
+  slowAttack: boolean;
+  double: boolean;
+}
+
+function judgePm(n: PmNote, checks: Map<PmNote, PitchCheck>): PmVerdict {
+  const muted = isPalmMuted(n, pmLimit());
+  const pitch = checks.get(n) ?? null;
+  const slowAttack = n.attack !== null && n.attack > attLimit();
+  const double = n.doubleGap !== null;
+  const v = (state: PmState): PmVerdict => ({ state, pitch, slowAttack, double });
+  if (muted === null) return v("wait");
+  if (!muted) return v("open");
+  // The pitch is measured 15–60 ms after the attack; until then the note is still pending.
+  if (n.bright === null && n.pitchClarity === null) return v("wait");
+  if (!pitch) return v("nopitch");
+  return v(Math.abs(pitch.cents) <= PITCH_TOL ? "pm" : "offpitch");
+}
+
+const attackIssues = (n: PmNote, v: PmVerdict) => {
+  const out: string[] = [];
+  if (v.double) out.push(`Двойная атака: медиатор ударил по струне дважды с разницей ${Math.round(n.doubleGap! * 1000)} мс. Бейте одним уверенным движением, не цепляйте струну.`);
+  if (v.slowAttack) out.push(`Атака ${fmtAtt(n.attack)} — дольше ${settings.attLimMs} мс: медиатор задерживается на струне. Меньше погружайте медиатор и не дожимайте струну перед ударом.`);
+  return out;
+};
+const cleanAttack = (v: PmVerdict) => !v.double && !v.slowAttack;
+
+const STATE_TITLE: Record<PmState, string> = {
+  wait: "Измеряю…",
+  pm: "Palm mute, нота та же",
+  open: "Открытая нота — нет приглушения",
+  nopitch: "Palm mute без высоты",
+  offpitch: "Palm mute, но нота другая",
+};
+const STATE_SHORT: Record<PmState, string> = { wait: "…", pm: "PM", open: "откр.", nopitch: "PM без высоты", offpitch: "PM, другая нота" };
+const STATE_HINT: Partial<Record<PmState, string>> = {
+  nopitch: "Слышен только стук: ладонь слишком далеко от подставки или давит слишком сильно. Сдвиньте её к подставке.",
+  offpitch: "Высота сбилась: ладонь давит на струну и меняет её натяжение или касается не там. Ослабьте нажим, держите ребро ладони у самой подставки.",
+  open: "Нота звенит: ладонь не касается струн. Положите ребро ладони на струны у подставки.",
+};
+const stateClass = (s: PmState) => (s === "pm" ? "pm" : s === "open" ? "open" : s === "wait" ? "" : "warn");
+
 function drawPmMarks(g: CanvasRenderingContext2D, W: number, H: number, top: number, dpr: number, xOf: (t: number) => number) {
   if (!pm) return;
-  const lim = pmLimit();
+  const checks = checkPitches(pm.notes, pmLimit());
   g.font = `600 ${11 * dpr}px "IBM Plex Mono", ui-monospace, monospace`;
   g.textBaseline = "top";
   for (const n of pm.notes) {
     const t = n.start / sr;
     if (t > viewStart + viewSpan) break;
     const x = xOf(t);
-    const pmd = isPalmMuted(n, lim);
-    const c = pmd === null ? col.text : pmd ? col.play : col.clip;
+    const v = judgePm(n, checks);
+    const c =
+      v.state === "wait" ? col.text : v.state === "open" ? col.clip : v.state === "pm" && cleanAttack(v) ? col.play : col.warn;
     const x20 = n.t20 === null ? null : xOf(t + n.t20);
     if (x20 !== null && x20 < 0) continue;
     g.fillStyle = c;
@@ -870,7 +924,10 @@ function drawPmMarks(g: CanvasRenderingContext2D, W: number, H: number, top: num
       g.globalAlpha = 1;
       g.fillRect(Math.round(x20), y - 4 * dpr, dpr, 11 * dpr);
     }
-    const label = `${pmd === null ? "" : pmd ? "PM " : "откр. "}${fmtT20(n)}`;
+    let label = `${STATE_SHORT[v.state]} ${fmtT20(n)}`;
+    if (v.pitch && v.state !== "wait") label += ` ${fmtCents(v.pitch.cents)}`;
+    if (v.double) label += " ×2";
+    if (v.slowAttack) label += ` ат.${Math.round(n.attack! * 1000)}`;
     const tw = g.measureText(label).width;
     if (x + 4 * dpr + tw > 0 && x < W) {
       g.fillStyle = col.stage;
@@ -885,54 +942,65 @@ function drawPmMarks(g: CanvasRenderingContext2D, W: number, H: number, top: num
 function renderPm() {
   if (!pm) return;
   pmRendered = pm.version;
-  const lim = pmLimit();
   const notes = pm.notes;
+  const checks = checkPitches(notes, pmLimit());
   const last = notes.at(-1);
   const box = $("pm-verdict");
-  const pmd = last ? isPalmMuted(last, lim) : null;
-  box.dataset.state = !last ? "none" : pmd === null ? "none" : pmd ? "pm" : "open";
-  $("pm-badge").textContent = !last ? "—" : pmd === null ? "…" : pmd ? "PM" : "✕";
-  $("pm-v-title").textContent = !last
-    ? recording
-      ? "Сыграйте ноту"
-      : "Нажмите ● и сыграйте ноту"
-    : pmd === null
-      ? "Измеряю затухание…"
-      : pmd
-        ? "Palm mute"
-        : "Открытая нота — нет приглушения";
+  const v = last ? judgePm(last, checks) : null;
+  const allGood = !!v && v.state === "pm" && cleanAttack(v);
+  box.dataset.state = !v || v.state === "wait" ? "none" : allGood ? "pm" : v.state === "open" ? "open" : "warn";
+  $("pm-badge").textContent = !v ? "—" : v.state === "wait" ? "…" : allGood ? "PM" : v.state === "open" ? "✕" : "!";
+  let title = !v ? (recording ? "Сыграйте ноту" : "Нажмите ● и сыграйте ноту") : STATE_TITLE[v.state];
+  if (v && v.state !== "wait") {
+    const extra = [v.double ? "двойная атака" : "", v.slowAttack ? "долгая атака" : ""].filter(Boolean);
+    if (extra.length) title += ` · ${extra.join(", ")}`;
+  }
+  $("pm-v-title").textContent = title;
   const parts: string[] = [];
-  if (last) {
+  if (last && v) {
+    if (v.pitch) parts.push(`струна ${v.pitch.name} ${fmtCents(v.pitch.cents)}${v.pitch.measuredRef ? "" : " от строя"}`);
     parts.push(`затухание ${fmtT20(last)}`);
     if (last.rate !== null) parts.push(`${Math.round(last.rate)} дБ/с`);
     parts.push(`атака ${fmtAtt(last.attack)}`);
     if (last.bright !== null) parts.push(`глухость ${Math.round((1 - last.bright) * 100)}%`);
   }
   $("pm-v-sub").textContent = parts.join(" · ");
+  $("pm-v-hint").textContent = v && last ? [STATE_HINT[v.state] ?? "", ...attackIssues(last, v)].filter(Boolean).join(" ") : "";
 
-  const rated = notes.filter((n) => n.t20 !== null);
-  const pms = rated.filter((n) => n.t20! <= lim);
-  const opens = rated.filter((n) => n.t20! > lim);
+  const judged = notes.map((n) => [n, judgePm(n, checks)] as const);
+  const rated = judged.filter(([, j]) => j.state !== "wait");
+  const muted = rated.filter(([, j]) => j.state !== "open");
+  const good = rated.filter(([, j]) => j.state === "pm");
   $("pm-count").textContent = String(notes.length);
-  $("pm-share").textContent = rated.length ? `${Math.round((pms.length / rated.length) * 100)}%` : "—";
-  const mp = median(pms.map((n) => n.t20!));
-  const mo = median(opens.map((n) => n.t20!));
+  $("pm-share").textContent = rated.length ? `${Math.round((muted.length / rated.length) * 100)}%` : "—";
+  $("pm-pitch").textContent = muted.length ? `${Math.round((good.length / muted.length) * 100)}%` : "—";
+  const mp = median(muted.map(([n]) => n.t20!));
+  const mo = median(rated.filter(([, j]) => j.state === "open").map(([n]) => n.t20!));
   $("pm-t-pm").textContent = mp === null ? "—" : fmtSec(mp);
   $("pm-t-open").textContent = mo === null ? "—" : fmtSec(mo);
   $("pm-att").textContent = fmtAtt(median(notes.flatMap((n) => (n.attack === null ? [] : [n.attack]))));
+  const attRated = rated.filter(([n]) => n.attack !== null || n.doubleChecked);
+  $("pm-att-ok").textContent = attRated.length
+    ? `${Math.round((attRated.filter(([, j]) => cleanAttack(j)).length / attRated.length) * 100)}%`
+    : "—";
+  $("pm-doubles").textContent = String(rated.filter(([, j]) => j.double).length);
 
   const list = $("pm-list");
   list.replaceChildren(
-    ...notes
+    ...judged
       .slice(-60)
       .reverse()
-      .map((n) => {
+      .map(([n, j]) => {
         const b = document.createElement("button");
-        const p = isPalmMuted(n, lim);
-        b.className = `pm-note ${p === null ? "" : p ? "pm" : "open"}`;
+        b.className = `pm-note ${j.state === "pm" && !cleanAttack(j) ? "warn" : stateClass(j.state)}`;
         const t = n.start / sr;
         const m = Math.floor(t / 60);
-        b.innerHTML = `<b>${p === null ? "…" : p ? "Palm mute" : "Открытая"}</b><span>${m}:${(t - m * 60).toFixed(2).padStart(5, "0")} · ${fmtT20(n)}</span><span>атака ${fmtAtt(n.attack)}${n.bright !== null ? ` · глух. ${Math.round((1 - n.bright) * 100)}%` : ""}</span>`;
+        const pitch = j.pitch ? `${j.pitch.name.split(" ")[0]} ${fmtCents(j.pitch.cents)}` : "без высоты";
+        b.innerHTML =
+          `<b>${j.state === "wait" ? "…" : STATE_SHORT[j.state] === "PM" ? "Palm mute" : STATE_SHORT[j.state] === "откр." ? "Открытая" : STATE_SHORT[j.state]}</b>` +
+          `<span>${m}:${(t - m * 60).toFixed(2).padStart(5, "0")} · ${fmtT20(n)}</span>` +
+          `<span>${pitch} · атака ${fmtAtt(n.attack)}${j.slowAttack ? " !" : ""}</span>` +
+          (j.double ? `<span class="pm-bad">двойная атака, ${Math.round(n.doubleGap! * 1000)} мс</span>` : "");
         b.addEventListener("click", () => {
           follow = false;
           viewSpan = Math.max(Math.min(viewSpan, 2), (n.t20 ?? 0.5) * 3);
@@ -945,6 +1013,18 @@ function renderPm() {
   );
 }
 
+function applyExercise() {
+  const isPm = settings.exercise === "pm";
+  $<HTMLSelectElement>("wv-ex").value = settings.exercise;
+  $("pm-card").hidden = !isPm;
+  $<HTMLInputElement>("pm-lim").value = String(settings.pmLimMs);
+  $("pm-lim-v").textContent = fmtSec(pmLimit());
+  $<HTMLInputElement>("pm-att-lim").value = String(settings.attLimMs);
+  $("pm-att-lim-v").textContent = `${settings.attLimMs} мс`;
+  pmRendered = -1;
+  if (isPm) renderPm();
+}
+
 /** Palm mute is practised on a driven tone: the pedal goes on at full drive. */
 function pmTone() {
   settings.mon.dist = true;
@@ -952,19 +1032,14 @@ function pmTone() {
   monitorChanged();
 }
 
-function applyExercise() {
-  const isPm = settings.exercise === "pm";
-  $<HTMLSelectElement>("wv-ex").value = settings.exercise;
-  $("pm-card").hidden = !isPm;
-  $<HTMLInputElement>("pm-lim").value = String(settings.pmLimMs);
-  $("pm-lim-v").textContent = fmtSec(pmLimit());
-  pmRendered = -1;
-  if (isPm) renderPm();
-}
-
 $<HTMLSelectElement>("wv-ex").addEventListener("change", (e) => {
   settings.exercise = (e.target as HTMLSelectElement).value as Settings["exercise"];
   if (settings.exercise === "pm") pmTone();
+  saveSettings();
+  applyExercise();
+});
+$<HTMLInputElement>("pm-att-lim").addEventListener("input", (e) => {
+  settings.attLimMs = Number((e.target as HTMLInputElement).value);
   saveSettings();
   applyExercise();
 });
