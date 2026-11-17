@@ -23,8 +23,11 @@ interface Settings {
   attLimMs: number;
   bpm: number;
   grid: GridDiv;
-  /** Digital gain on the input, dB. */
+  /** Digital gain on the input, dB (set by hand, or the last value auto-level arrived at). */
   inGainDb: number;
+  /** Auto-level: raise or lower the input gain so played notes peak near targetDb. */
+  autoInGain: boolean;
+  targetDb: number;
   /** Fit the wave height to the visible peak. */
   autoGain: boolean;
   mon: MonitorSettings;
@@ -41,6 +44,8 @@ function loadSettings(): Settings {
     bpm: 120,
     grid: "4",
     inGainDb: 0,
+    autoInGain: true,
+    targetDb: -12,
     autoGain: true,
     mon: { ...MONITOR_DEFAULTS },
   });
@@ -158,6 +163,48 @@ function onInputBlock(d: Float32Array) {
   const now = performance.now();
   recentPeaks.push([now, db]);
   while (recentPeaks.length && recentPeaks[0][0] < now - 3000) recentPeaks.shift();
+  autoLevel(pk, d.length / sr, now);
+}
+
+/** Raw (pre-gain) block peaks of the last 6 s. */
+const rawPeaks: [number, number][] = [];
+let lastGainSave = 0;
+
+/**
+ * Slow auto-level of the input. Gain moves only between takes (6 dB/s up, 10 dB/s down) so it never
+ * reshapes a note's decay; during recording it only backs off to stop clipping.
+ */
+function autoLevel(pk: number, dt: number, now: number) {
+  const raw = pk / 10 ** (settings.inGainDb / 20);
+  rawPeaks.push([now, raw]);
+  while (rawPeaks.length && rawPeaks[0][0] < now - 6000) rawPeaks.shift();
+  if (!settings.autoInGain) return;
+  if (pk > 0.89) {
+    // Clipping: drop at once so the peak lands near −6 dB.
+    setInGain(settings.inGainDb - 20 * Math.log10(pk / 0.5));
+    return;
+  }
+  if (recording || rawPeaks.length < 50) return;
+  const sorted = rawPeaks.map((p) => p[1]).sort((a, b) => a - b);
+  const floor = sorted[Math.floor(sorted.length * 0.2)];
+  let loud = 0;
+  for (const [t, v] of rawPeaks) if (t >= now - 4000) loud = Math.max(loud, v);
+  // Only adjust while something is being played (12 dB above the background).
+  if (loud < 1e-6 || loud < floor * 4) return;
+  const want = Math.min(50, Math.max(0, settings.targetDb - 20 * Math.log10(loud)));
+  const diff = want - settings.inGainDb;
+  if (Math.abs(diff) < 1.5) return;
+  setInGain(settings.inGainDb + Math.max(-10 * dt, Math.min(6 * dt, diff)));
+}
+
+function setInGain(db: number) {
+  settings.inGainDb = Math.min(50, Math.max(0, db));
+  node?.port.postMessage({ gain: 10 ** (settings.inGainDb / 20) });
+  const now = performance.now();
+  if (now - lastGainSave > 2000) {
+    lastGainSave = now;
+    saveSettings();
+  }
 }
 
 /** Blocks of the processed signal (after all effects): this is what gets recorded. */
@@ -834,6 +881,7 @@ function renderStats() {
   } else $("wv-peak").textContent = "—";
   $("wv-gain").textContent = `×${gain < 10 ? gain.toFixed(1) : gain.toFixed(0)}${settings.autoGain ? " авто" : ""}`;
   renderWeak();
+  showInGain();
   const lv = Math.max(0, Math.min(1, (levelDb + 60) / 60));
   const lvl = $("wv-level");
   lvl.style.width = `${lv * 100}%`;
@@ -1171,15 +1219,76 @@ function renderWeak() {
 }
 
 const inGain = $<HTMLInputElement>("wv-ingain");
-inGain.value = String(settings.inGainDb);
-const showInGain = () => ($("wv-ingain-v").textContent = `+${settings.inGainDb} дБ`);
+let shownGain = "";
+/** Keeps the input-gain slider in step with auto-level. */
+function showInGain() {
+  const text = `${settings.autoInGain ? "авто " : ""}+${Math.round(settings.inGainDb)} дБ`;
+  if (text === shownGain) return;
+  shownGain = text;
+  $("wv-ingain-v").textContent = text;
+  inGain.value = String(Math.round(settings.inGainDb));
+  inGain.disabled = settings.autoInGain;
+  inGain.title = settings.autoInGain ? "Подбирается автоматически; отключить — Файл → Настройки" : "";
+}
 showInGain();
 inGain.addEventListener("input", () => {
-  settings.inGainDb = Number(inGain.value);
+  setInGain(Number(inGain.value));
   saveSettings();
   showInGain();
-  node?.port.postMessage({ gain: 10 ** (settings.inGainDb / 20) });
 });
+
+// ---------- settings dialog ----------
+
+const dlg = $<HTMLDialogElement>("settings");
+interface Field {
+  id: string;
+  get: () => string | boolean;
+  set: (v: string | boolean) => void;
+  fmt?: (v: string) => string;
+}
+const FIELDS: Field[] = [
+  { id: "st-autoin", get: () => settings.autoInGain, set: (v) => (settings.autoInGain = v as boolean) },
+  { id: "st-target", get: () => String(settings.targetDb), set: (v) => (settings.targetDb = Number(v)), fmt: (v) => `${v} дБ` },
+  { id: "st-ingain", get: () => String(Math.round(settings.inGainDb)), set: (v) => setInGain(Number(v)), fmt: (v) => `+${v} дБ` },
+  { id: "st-autoheight", get: () => settings.autoGain, set: (v) => ((settings.autoGain = v as boolean), v || (gain = 1)) },
+  { id: "st-mon", get: () => settings.monOn, set: (v) => (settings.monOn = v as boolean) },
+  { id: "st-bpm", get: () => String(settings.bpm), set: (v) => (settings.bpm = Math.min(300, Math.max(30, Number(v) || 120))) },
+  { id: "st-grid", get: () => settings.grid, set: (v) => (settings.grid = v as GridDiv) },
+  { id: "st-pmlim", get: () => String(settings.pmLimMs), set: (v) => (settings.pmLimMs = Number(v)), fmt: (v) => `${v} мс` },
+  { id: "st-attlim", get: () => String(settings.attLimMs), set: (v) => (settings.attLimMs = Number(v)), fmt: (v) => `${v} мс` },
+];
+
+function fillSettings() {
+  for (const f of FIELDS) {
+    const el = $<HTMLInputElement>(f.id);
+    const v = f.get();
+    if (el.type === "checkbox") el.checked = v as boolean;
+    else el.value = v as string;
+    if (f.fmt) $(`${f.id}-v`).textContent = f.fmt(el.value);
+  }
+  $<HTMLInputElement>("st-ingain").disabled = settings.autoInGain;
+  $<HTMLInputElement>("st-target").disabled = !settings.autoInGain;
+}
+
+for (const f of FIELDS) {
+  const el = $<HTMLInputElement>(f.id);
+  el.addEventListener(el.type === "range" ? "input" : "change", () => {
+    f.set(el.type === "checkbox" ? el.checked : el.value);
+    saveSettings();
+    // Keep the other copies of these controls in step.
+    fillSettings();
+    showInGain();
+    renderViewMenu();
+    gridSel.value = settings.grid;
+    bpmIn.value = String(settings.bpm);
+    applyExercise();
+  });
+}
+$("st-open").addEventListener("click", () => {
+  fillSettings();
+  dlg.showModal();
+});
+$("st-close").addEventListener("click", () => dlg.close());
 $("ed-desel").addEventListener("click", KEYS.Escape);
 $("wv-live").addEventListener("click", () => {
   follow = true;

@@ -217,6 +217,8 @@
             <button role="menuitem" id="ed-save-sel">Сохранить выделение в WAV</button>
             <hr />
             <button role="menuitem" id="wv-clear">Очистить всё</button>
+            <hr />
+            <button role="menuitem" id="st-open">Настройки…</button>
           </div>
         </div>
         <div class="menu">
@@ -262,8 +264,43 @@
             <button role="menuitemradio" data-ex="pm" aria-checked="false">Palm mute</button>
           </div>
         </div>
-        <input id="ed-file" type="file" accept="audio/*,.wav,.mp3,.m4a,.ogg,.flac" multiple hidden />
+ <input id="ed-file" type="file" accept="audio/*,.wav,.mp3,.m4a,.ogg,.flac" multiple hidden />
       </nav>
+      <dialog id="settings" class="settings" aria-labelledby="st-title">
+        <form method="dialog">
+          <h2 id="st-title">Настройки</h2>
+          <fieldset>
+            <legend>Вход</legend>
+            <label class="check"><input id="st-autoin" type="checkbox" /> Автоусиление входа</label>
+            <p class="note">Подбирает усиление так, чтобы пики игры были около целевого уровня. Меняется только между дублями (во время записи — лишь убавляется при перегрузе), чтобы не искажать затухание нот.</p>
+            <label class="field"><span>Целевой пик <b id="st-target-v" class="mono"></b></span><input id="st-target" type="range" min="-24" max="-3" step="1" /></label>
+            <label class="field"><span>Ручное усиление <b id="st-ingain-v" class="mono"></b></span><input id="st-ingain" type="range" min="0" max="50" step="1" /></label>
+            <label class="check"><input id="st-mon" type="checkbox" /> Звук в наушники при включении входа</label>
+          </fieldset>
+          <fieldset>
+            <legend>Вид и сетка</legend>
+            <label class="check"><input id="st-autoheight" type="checkbox" /> Автомасштаб волны по высоте</label>
+            <div class="st-row">
+              <label class="field"><span>Темп, уд/мин</span><input id="st-bpm" type="number" min="30" max="300" class="num" /></label>
+              <label class="field"><span>Сетка</span>
+                <select id="st-grid">
+                  <option value="off">выкл.</option>
+                  <option value="1">такт</option>
+                  <option value="4">1/4</option>
+                  <option value="8">1/8</option>
+                  <option value="16">1/16</option>
+                </select>
+              </label>
+            </div>
+          </fieldset>
+          <fieldset>
+            <legend>Palm mute</legend>
+            <label class="field"><span>Palm mute, если −20 дБ быстрее, чем <b id="st-pmlim-v" class="mono"></b></span><input id="st-pmlim" type="range" min="100" max="1000" step="10" /></label>
+            <label class="field"><span>Атака не дольше <b id="st-attlim-v" class="mono"></b></span><input id="st-attlim" type="range" min="5" max="120" step="1" /></label>
+          </fieldset>
+          <div class="st-actions"><button id="st-close" class="btn" value="ok">Готово</button></div>
+        </form>
+      </dialog>
       <div class="toolbar">
         <p class="lede">Волна сигнала с гитары. Запись — ● или R (дубль до 5 минут), каждый дубль — отдельный кусочек: его можно двигать по сетке, переносить на другую дорожку и резать.</p>
         <div class="controls">
@@ -282,7 +319,7 @@
           </label>
           <label class="field">
             <span>Усиление входа <b id="wv-ingain-v" class="mono"></b></span>
-            <input id="wv-ingain" type="range" min="0" max="40" step="1" />
+            <input id="wv-ingain" type="range" min="0" max="50" step="1" />
           </label>
         </div>
       </div>
