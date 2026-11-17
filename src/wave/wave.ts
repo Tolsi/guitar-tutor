@@ -704,7 +704,9 @@ const fmtDb = (v: number) => (v > 1e-6 ? `${(20 * Math.log10(v)).toFixed(1)} Ð´Ð
 const RULER = 22;
 const MAX_GAIN = 300;
 /** Lanes shown: the used ones, plus an empty one while a clip is being dragged. */
-const laneCount = () => (tl ? tl.lanes + (drag?.mode === "clip" ? 1 : 0) : 1);
+// No spare lane while dragging: it would shrink every lane (and the wave) the moment a clip is grabbed.
+// A new lane appears only when a clip is dropped into the bottom strip of the last lane (see pointermove).
+const laneCount = () => (tl ? tl.lanes : 1);
 
 function drawWave() {
   const { g, W, H, dpr } = fit(wave);
@@ -1076,7 +1078,15 @@ wave.addEventListener("pointermove", (e) => {
     const gs = gridStep();
     if (gs && !e.shiftKey) pos = Math.round(pos / (gs * sr)) * gs * sr;
     drag.clip.pos = Math.max(0, Math.round(pos));
-    drag.clip.lane = Math.min(lane, tl.lanes);
+    // Bottom 15 % of the last lane (or below the wave) means "a new lane under the others".
+    const c = drag.clip;
+    let others = -1;
+    for (const o of tl.clips) if (o !== c) others = Math.max(others, o.lane);
+    const laneH = (wave.clientHeight - RULER) / laneCount();
+    const last = laneCount() - 1;
+    let want = lane;
+    if (lane >= last && py > RULER + (last + 0.85) * laneH) want = last + 1;
+    c.lane = Math.max(0, Math.min(want, others + 1));
     follow = false;
   }
 });
