@@ -11,6 +11,15 @@ const ONSET_RISE_DB = 8;
 const ONSET_LOOKBACK = 8;
 const REFRACTORY = 16;
 const PEAK_SEARCH = 8;
+/** Spectral-flux onsets: FFT size, compared frame lag (hops), bins up to this frequency. */
+const FLUX_N = 1024;
+const FLUX_LAG = 2;
+const FLUX_TOP_HZ = 6000;
+/** Flux must beat FLUX_K × the recent average plus FLUX_MIN (per bin) to count as a pick hit… */
+const FLUX_K = 2;
+const FLUX_MIN = 0.01;
+/** …or rise above it while high frequencies jump HF_K-fold (a pick hit buried in a distorted chord). */
+const HF_K = 3;
 
 export interface PmNote {
   /** Sample index of the attack. */
@@ -42,6 +51,14 @@ export interface PmNote {
 export class PmAnalyzer {
   readonly hop: number;
   private hopEnergy = new Float64Array(1 << 14);
+  /** High-frequency (second-difference) energy per hop: locates the pick transient. */
+  private hopHf = new Float64Array(1 << 14);
+  /** Spectral flux per hop, and the log spectra of the last FLUX_LAG + 1 hops (ring). */
+  flux = new Float32Array(1 << 14);
+  private logSpec: Float32Array[] = [];
+  private fftRe = new Float64Array(FLUX_N);
+  private fftIm = new Float64Array(FLUX_N);
+  private win = new Float64Array(FLUX_N).map((_, i) => 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (FLUX_N - 1)));
   env = new Float32Array(1 << 14);
   frames = 0;
   notes: PmNote[] = [];
@@ -57,6 +74,7 @@ export class PmAnalyzer {
     this.frames = 0;
     this.notes = [];
     this.lastOnset = -1e9;
+    this.logSpec = [];
     this.version++;
   }
 
@@ -64,6 +82,12 @@ export class PmAnalyzer {
     const e = new Float64Array(this.hopEnergy.length * 2);
     e.set(this.hopEnergy);
     this.hopEnergy = e;
+    const h = new Float64Array(this.hopHf.length * 2);
+    h.set(this.hopHf);
+    this.hopHf = h;
+    const f = new Float32Array(this.flux.length * 2);
+    f.set(this.flux);
+    this.flux = f;
     const v = new Float32Array(this.env.length * 2);
     v.set(this.env);
     this.env = v;
@@ -78,17 +102,24 @@ export class PmAnalyzer {
     while (this.frames < avail) {
       const k = this.frames;
       if (k >= this.env.length) this.grow();
-      let ss = 0;
+      let ss = 0, hf = 0;
       for (let i = k * H, e = i + H; i < e; i++) {
         const v = store.at(i);
         ss += v * v;
+        if (i >= 2) {
+          const d = v - 2 * store.at(i - 1) + store.at(i - 2);
+          hf += d * d;
+        }
       }
       this.hopEnergy[k] = ss;
+      this.hopHf[k] = hf;
+      this.flux[k] = this.spectralFlux(k, store);
       let sum = 0, n = 0;
       for (let j = Math.max(0, k - WIN + 1); j <= k; j++) (sum += this.hopEnergy[j]), n++;
       this.env[k] = 10 * Math.log10(sum / (n * H) + 1e-12);
       this.frames++;
       this.detectOnset(k, store);
+      this.detectFluxOnset(k - 1, store);
     }
     // Re-measure notes that are still ringing.
     for (let i = this.notes.length - 1; i >= 0; i--) {
@@ -125,6 +156,70 @@ export class PmAnalyzer {
       this.notes.push(this.newNote(on));
       return;
     }
+    if (prev && !prev.done) {
+      this.measure(prev, this.notes.length - 1, store, on);
+      prev.done = true;
+    }
+    this.notes.push(this.newNote(on));
+    if (this.notes.length > 2000) this.notes.shift();
+  }
+
+  /**
+   * Sum of positive changes of the log spectrum against FLUX_LAG hops earlier, per bin. A pick hit
+   * changes the spectrum even when the level hardly moves: a ringing string struck again, a second
+   * string joining, or a distorted (compressed) tone.
+   */
+  private spectralFlux(k: number, store: SampleStore) {
+    const N = FLUX_N, end = (k + 1) * this.hop;
+    const re = this.fftRe, im = this.fftIm;
+    for (let i = 0; i < N; i++) {
+      const j = end - N + i;
+      re[i] = j >= 0 ? store.at(j) * this.win[i] : 0;
+      im[i] = 0;
+    }
+    fft(re, im);
+    const top = Math.min(N / 2, Math.round((FLUX_TOP_HZ * N) / this.sr));
+    const spec = this.logSpec.length > FLUX_LAG ? this.logSpec.shift()! : new Float32Array(top);
+    // Amplitude scale (Hann sum = N/2) and log compression: ≈0 for the noise, ≈1–3 for notes.
+    const scale = 4 / N;
+    for (let b = 1; b < top; b++) spec[b] = Math.log10(1 + 1000 * scale * Math.hypot(re[b], im[b]));
+    this.logSpec.push(spec);
+    if (this.logSpec.length <= FLUX_LAG) return 0;
+    const old = this.logSpec[0];
+    let f = 0;
+    for (let b = 1; b < top; b++) {
+      const d = spec[b] - old[b];
+      if (d > 0) f += d;
+    }
+    return f / top;
+  }
+
+  /** Flux peak at hop k (needs k + 1): a new pick hit even if the level barely rose. */
+  private detectFluxOnset(k: number, store: SampleStore) {
+    if (k < 40 || k - this.lastOnset < REFRACTORY) return;
+    const f = this.flux;
+    if (!(f[k] >= f[k - 1] && f[k] > f[k + 1])) return;
+    let avg = 0;
+    for (let j = k - 40; j < k - 3; j++) avg += f[j];
+    avg /= 37;
+    // A pick hit also shows as a burst of high frequencies over the last 20 ms (longer than a low-E period).
+    let hfBefore = 0;
+    for (let j = k - 8; j < k - 4; j++) hfBefore = Math.max(hfBefore, this.hopHf[j]);
+    let hfNow = 0;
+    for (let j = k - 4; j <= k; j++) hfNow = Math.max(hfNow, this.hopHf[j]);
+    const hfJump = hfNow > HF_K * hfBefore;
+    if (f[k] < FLUX_K * avg + FLUX_MIN && !(hfJump && f[k] > avg * 1.2)) return;
+    const e = this.env;
+    if (e[k] < GATE_DB) return;
+    // The flux window trails the hit; the hit itself is the sharpest jump of high frequencies just before.
+    let on = k, best = -Infinity;
+    for (let j = Math.max(1, k - 5); j <= k; j++) {
+      const jump = Math.log10((this.hopHf[j] + 1e-15) / (this.hopHf[j - 1] + 1e-15));
+      if (jump > best) (best = jump), (on = j);
+    }
+    if (on - this.lastOnset < REFRACTORY) return;
+    this.lastOnset = k;
+    const prev = this.notes.at(-1);
     if (prev && !prev.done) {
       this.measure(prev, this.notes.length - 1, store, on);
       prev.done = true;
