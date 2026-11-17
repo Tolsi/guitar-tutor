@@ -1664,7 +1664,7 @@ function drawPmMarks(
     let label = `${STATE_SHORT[v.state]} ${fmtNote(n)} ${fmtT20(n)}`;
     if (v.pitch && v.state !== "wait") label += ` стр.${fmtCents(v.pitch.cents)}`;
     if (v.double) label += " ×2";
-    if (v.slowAttack) label += ` ат.${Math.round(n.attack! * 1000)}`;
+    if (n.attack !== null) label += ` ат.${Math.round(n.attack * 1000)}${v.slowAttack ? "!" : ""}`;
     const tw = g.measureText(label).width;
     if (x + 4 * dpr + tw > 0 && x < W) {
       g.fillStyle = col.stage;
