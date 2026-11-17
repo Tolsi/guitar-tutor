@@ -17,6 +17,7 @@
       <nav class="tabs" aria-label="Упражнения">
         <a href="#strum">Правая рука при игре боем</a>
         <a href="#legato">Легатная техника</a>
+        <a href="#wave">Звуковая волна</a>
       </nav>
     </header>
 
@@ -202,6 +203,53 @@
             <div id="lg-list" class="lg-list"></div>
           </section>
         </aside>
+      </main>
+    </div>
+
+    <div id="tab-wave" class="tab" hidden>
+      <div class="toolbar">
+        <p class="lede">Волна сигнала с гитары в реальном времени. Запись идёт, пока включён вход (до 5 минут). Любой кусок можно растянуть до отдельных сэмплов.</p>
+        <div class="controls">
+          <button id="wv-start" class="btn">Включить аудиовход</button>
+          <label class="field">
+            <span>Вход</span>
+            <select id="wv-device" disabled><option>—</option></select>
+          </label>
+          <button id="wv-rec" class="btn rec" disabled>Запись</button>
+          <button id="wv-clear" class="btn ghost">Очистить</button>
+        </div>
+      </div>
+
+      <main class="wv-wrap">
+        <section class="lg-card">
+          <div class="wv-stats">
+            <div><span>Записано</span><b id="wv-dur" class="mono">0.0 с</b></div>
+            <div><span>Частота, кГц</span><b id="wv-rate" class="mono">—</b></div>
+            <div><span>На экране</span><b id="wv-span" class="mono">—</b><small id="wv-spp" class="mono"></small></div>
+            <div><span>Пик видимого</span><b id="wv-peak" class="mono">—</b></div>
+            <div><span>Усиление</span><b id="wv-gain" class="mono">×1</b></div>
+          </div>
+          <div class="level wv-level" title="Уровень входа"><i id="wv-level"></i></div>
+          <div class="wv-plot">
+            <canvas id="wv-canvas" class="wv-canvas"></canvas>
+            <button id="wv-live" class="btn small wv-live" hidden>К реальному времени →</button>
+          </div>
+          <canvas id="wv-over" class="wv-over" title="Вся запись: нажмите или тяните, чтобы перейти"></canvas>
+          <div class="wv-bar">
+            <span id="wv-cursor" class="mono wv-cursor">Наведите на волну</span>
+            <div class="wv-actions">
+              <button id="wv-all" class="btn ghost small">Вся запись</button>
+              <button id="wv-play" class="btn ghost small">Прослушать видимое</button>
+            </div>
+          </div>
+          <p class="wv-keys">
+            <span><kbd>⌘</kbd>/<kbd>Ctrl</kbd> + колесо — масштаб вокруг курсора</span>
+            <span><kbd>Shift</kbd> + колесо — прокрутка по записи</span>
+            <span><kbd>⌥</kbd> + колесо — усиление по высоте</span>
+            <span>Перетаскивание — прокрутка, двойной клик — вся запись</span>
+          </p>
+          <p id="wv-status" class="note" role="status">Вход выключен.</p>
+        </section>
       </main>
     </div>
     <script type="module" src="/src/main.ts"></script>

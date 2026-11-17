@@ -1,8 +1,9 @@
 import "./style.css";
 import { setStrumVisible } from "./strum/strum";
 import { setLegatoVisible } from "./legato/legato";
+import { setWaveVisible } from "./wave/wave";
 
-const TABS = ["strum", "legato"] as const;
+const TABS = ["strum", "legato", "wave"] as const;
 type Tab = (typeof TABS)[number];
 
 function show() {
@@ -14,6 +15,7 @@ function show() {
   }
   setStrumVisible(tab === "strum");
   setLegatoVisible(tab === "legato");
+  setWaveVisible(tab === "wave");
 }
 
 window.addEventListener("hashchange", show);
