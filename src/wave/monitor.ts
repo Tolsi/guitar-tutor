@@ -109,8 +109,12 @@ class Bypass {
 }
 
 export class Monitor {
-  /** Connect sources (live input, playback) here. */
+  /** The live input goes in here. */
   readonly input: GainNode;
+  /** Output of the whole effect chain (pedal, amp, cabinet). */
+  readonly wet: GainNode;
+  /** Recorded audio for playback: skips the effects and the headphone switch. */
+  readonly playIn: GainNode;
   private readonly ampTrim: GainNode;
   private readonly volume: GainNode;
   private readonly gate: GainNode;
@@ -165,12 +169,19 @@ export class Monitor {
     this.norm = ctx.createGain();
     nam.connect(this.norm).connect(this.cab.input);
 
-    // Output: volume, a safety limiter, and the on/off gate.
-    this.volume = ctx.createGain();
-    const limiter = new DynamicsCompressorNode(ctx, { threshold: -6, knee: 0, ratio: 20, attack: 0.002, release: 0.1 });
+    // The processed signal: what gets recorded, drawn and analysed.
+    this.wet = ctx.createGain();
+    this.cab.output.connect(this.wet);
+    // Output: the headphone switch for the live signal, then volume and a safety limiter. Playback of
+    // recorded (already processed) audio joins after the switch, so it is not processed twice.
     this.gate = ctx.createGain();
     this.gate.gain.value = 0;
-    this.cab.output.connect(this.volume).connect(limiter).connect(this.gate).connect(ctx.destination);
+    this.playIn = ctx.createGain();
+    this.volume = ctx.createGain();
+    const limiter = new DynamicsCompressorNode(ctx, { threshold: -6, knee: 0, ratio: 20, attack: 0.002, release: 0.1 });
+    this.wet.connect(this.gate).connect(this.volume);
+    this.playIn.connect(this.volume);
+    this.volume.connect(limiter).connect(ctx.destination);
 
     this.apply();
   }

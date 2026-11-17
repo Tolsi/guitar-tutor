@@ -21,10 +21,15 @@ class Capture extends AudioWorkletProcessor {
   private power = [0, 0];
   private sel = 0;
   private sinceReport = 0;
+  private gain = 1;
+  private out = new Float32Array(128);
 
   constructor() {
     super();
-    this.port.onmessage = (e: MessageEvent<{ mode: ChannelMode }>) => (this.mode = e.data.mode);
+    this.port.onmessage = (e: MessageEvent<{ mode?: ChannelMode; gain?: number }>) => {
+      if (e.data.mode !== undefined) this.mode = e.data.mode;
+      if (e.data.gain !== undefined) this.gain = e.data.gain;
+    };
   }
 
   process(inputs: Float32Array[][], outputs: Float32Array[][]) {
@@ -47,7 +52,11 @@ class Capture extends AudioWorkletProcessor {
       if (inp.length > 1 && this.power[other] > 4 * this.power[this.sel] + 1e-12) this.sel = other;
       if (inp.length === 1) this.sel = 0;
     } else this.sel = Math.min(this.mode, inp.length - 1);
-    const ch = inp[this.sel];
+    const raw = inp[this.sel];
+    if (this.out.length !== raw.length) this.out = new Float32Array(raw.length);
+    const ch = this.out;
+    // Input gain for quiet interfaces: applied to the recording and the monitor alike.
+    for (let i = 0; i < raw.length; i++) ch[i] = raw[i] * this.gain;
     if (out) out.set(ch);
     for (let i = 0; i < ch.length; i++) {
       this.buf[this.n++] = ch[i];

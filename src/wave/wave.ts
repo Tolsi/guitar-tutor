@@ -23,6 +23,10 @@ interface Settings {
   attLimMs: number;
   bpm: number;
   grid: GridDiv;
+  /** Digital gain on the input, dB. */
+  inGainDb: number;
+  /** Fit the wave height to the visible peak. */
+  autoGain: boolean;
   mon: MonitorSettings;
 }
 function loadSettings(): Settings {
@@ -36,6 +40,8 @@ function loadSettings(): Settings {
     attLimMs: 40,
     bpm: 120,
     grid: "4",
+    inGainDb: 0,
+    autoGain: true,
     mon: { ...MONITOR_DEFAULTS },
   });
   try {
@@ -61,6 +67,9 @@ let ctx: AudioContext | null = null;
 let stream: MediaStream | null = null;
 let source: MediaStreamAudioSourceNode | null = null;
 let node: AudioWorkletNode | null = null;
+/** Records the processed signal; fed by the effect chain, or straight by the input until it is up. */
+let tap: AudioWorkletNode | null = null;
+let tapFrom: AudioNode | null = null;
 let tl: Timeline | null = null;
 let sr = 48000;
 
@@ -83,6 +92,9 @@ let pausedAt: number | null = null;
 /** Time range selected for playback and export, seconds. */
 let selection: { a: number; b: number } | null = null;
 let selClip: Clip | null = null;
+/** Block peaks (time, dBFS) of the last 3 s, for the weak-signal warning. */
+const recentPeaks: [number, number][] = [];
+let inputSince = 0;
 
 const wave = $<HTMLCanvasElement>("wv-canvas");
 const over = $<HTMLCanvasElement>("wv-over");
@@ -137,11 +149,19 @@ function clampView() {
   else viewStart = Math.min(Math.max(viewStart, 0), Math.max(0, t - viewSpan));
 }
 
-function onBlock(d: Float32Array) {
+/** Blocks of the raw input (after channel choice and input gain): only the level meter and warning. */
+function onInputBlock(d: Float32Array) {
   let pk = 0;
   for (let i = 0; i < d.length; i++) pk = Math.max(pk, Math.abs(d[i]));
   const db = pk > 0 ? 20 * Math.log10(pk) : -Infinity;
   levelDb = db > levelDb ? db : levelDb - 0.6;
+  const now = performance.now();
+  recentPeaks.push([now, db]);
+  while (recentPeaks.length && recentPeaks[0][0] < now - 3000) recentPeaks.shift();
+}
+
+/** Blocks of the processed signal (after all effects): this is what gets recorded. */
+function onTapBlock(d: Float32Array) {
   if (!recording || !rec) return;
   const st = rec.take.store;
   st.push(d);
@@ -150,6 +170,19 @@ function onBlock(d: Float32Array) {
     setRecording(false);
     $("wv-status").textContent = `Дубль достиг предела ${MAX_SECONDS / 60} мин. Нажмите ●, чтобы записать следующий.`;
   }
+}
+
+function routeTap(from: AudioNode) {
+  if (!tap) return;
+  if (tapFrom) {
+    try {
+      tapFrom.disconnect(tap);
+    } catch {
+      /* was not connected */
+    }
+  }
+  from.connect(tap);
+  tapFrom = from;
 }
 
 /** The audio context and timeline, created on first use (input or a file import). */
@@ -166,6 +199,21 @@ async function ensureCtx() {
   ctx = c;
   sr = c.sampleRate;
   tl = new Timeline(sr);
+  tap = new AudioWorkletNode(c, "wave-capture", {
+    numberOfInputs: 1,
+    numberOfOutputs: 1,
+    outputChannelCount: [1],
+    channelCount: 1,
+    channelCountMode: "explicit",
+    channelInterpretation: "discrete",
+  });
+  tap.port.postMessage({ mode: 0 });
+  tap.port.onmessage = (e: MessageEvent<Float32Array | ChannelReport>) => {
+    if (e.data instanceof Float32Array) onTapBlock(e.data);
+  };
+  const mute = c.createGain();
+  mute.gain.value = 0;
+  tap.connect(mute).connect(c.destination);
   return c;
 }
 
@@ -198,21 +246,27 @@ async function openInput() {
       channelInterpretation: "discrete",
     });
     node.port.onmessage = (e: MessageEvent<Float32Array | ChannelReport>) =>
-      e.data instanceof Float32Array ? onBlock(e.data) : onChannels(e.data);
-    node.port.postMessage({ mode: settings.channel });
+      e.data instanceof Float32Array ? onInputBlock(e.data) : onChannels(e.data);
+    node.port.postMessage({ mode: settings.channel, gain: 10 ** (settings.inGainDb / 20) });
     const mute = c.createGain();
     mute.gain.value = 0;
     source.connect(node).connect(mute).connect(c.destination);
-    // The monitor hears the same chosen channel as the recording.
-    if (monitor) node.connect(monitor.input);
-    else if (settings.monOn) void startMonitor();
+    // The effect chain always runs (the headphone switch only mutes it); recording taps its output.
+    if (monitor) {
+      node.connect(monitor.input);
+      routeTap(monitor.wet);
+    } else {
+      routeTap(node);
+      void startMonitor();
+    }
 
+    inputSince = performance.now();
     const track = stream.getAudioTracks()[0];
     status.textContent = `Вход: ${track.label || "микрофон"}, ${sr / 1000} кГц`;
     const start = $<HTMLButtonElement>("wv-start");
     start.textContent = "Вход включён";
     start.disabled = true;
-    $<HTMLButtonElement>("wv-rec").disabled = false;
+    $<HTMLButtonElement>("wv-rec").disabled = !monitor;
     await fillDevices(track.getSettings().deviceId ?? "");
   } catch (e) {
     console.error(e);
@@ -398,8 +452,8 @@ function togglePlay() {
   buf.copyToChannel(data, 0);
   const src = ctx.createBufferSource();
   src.buffer = buf;
-  // With monitoring on, the take plays back through the amp too.
-  src.connect(monitor?.enabled ? monitor.input : ctx.destination);
+  // Takes are recorded after the effects: play them straight to the output.
+  src.connect(monitor ? monitor.playIn : ctx.destination);
   src.onended = () => stopPlay();
   void ctx.resume();
   src.start();
@@ -568,6 +622,7 @@ function fmtSpan(s: number) {
 const fmtDb = (v: number) => (v > 1e-6 ? `${(20 * Math.log10(v)).toFixed(1)} дБ` : "−∞ дБ");
 
 const RULER = 22;
+const MAX_GAIN = 300;
 /** Lanes shown: the used ones, plus an empty one while a clip is being dragged. */
 const laneCount = () => (tl ? tl.lanes + (drag?.mode === "clip" ? 1 : 0) : 1);
 
@@ -618,6 +673,15 @@ function drawWave() {
     g.globalAlpha = 1;
   }
 
+  if (settings.autoGain && tl && tl.length) {
+    const [mn, mx] = tl.range(Math.floor(viewStart * sr), Math.ceil((viewStart + viewSpan) * sr));
+    const peak = Math.max(-mn, mx);
+    if (peak > 1e-5) {
+      const want = Math.min(MAX_GAIN, Math.max(1, 0.85 / peak));
+      // Ease towards the target so the view does not jump on every note.
+      gain += (want - gain) * (want < gain ? 0.5 : 0.15);
+    }
+  }
   if (tl && tl.clips.length) {
     const checks = new Map<Take, Map<PmNote, PitchCheck>>();
     for (const c of tl.clips) {
@@ -768,7 +832,8 @@ function renderStats() {
     const [mn, mx] = tl.range(Math.floor(viewStart * sr), Math.ceil((viewStart + viewSpan) * sr));
     $("wv-peak").textContent = mn <= mx ? fmtDb(Math.max(-mn, mx)) : "—";
   } else $("wv-peak").textContent = "—";
-  $("wv-gain").textContent = `×${gain < 10 ? gain.toFixed(1) : gain.toFixed(0)}`;
+  $("wv-gain").textContent = `×${gain < 10 ? gain.toFixed(1) : gain.toFixed(0)}${settings.autoGain ? " авто" : ""}`;
+  renderWeak();
   const lv = Math.max(0, Math.min(1, (levelDb + 60) / 60));
   const lvl = $("wv-level");
   lvl.style.width = `${lv * 100}%`;
@@ -852,7 +917,10 @@ wave.addEventListener(
       }
     } else if (e.altKey) {
       e.preventDefault();
-      gain = Math.min(64, Math.max(1, gain * Math.exp(-(dy || dx) * 0.003)));
+      settings.autoGain = false;
+      saveSettings();
+      renderViewMenu();
+      gain = Math.min(MAX_GAIN, Math.max(1, gain * Math.exp(-(dy || dx) * 0.003)));
     } else if (e.shiftKey || Math.abs(dx) > Math.abs(dy)) {
       e.preventDefault();
       const d = Math.abs(dx) > Math.abs(dy) ? dx : dy;
@@ -1072,7 +1140,46 @@ const zoomBy = (k: number) => {
 };
 $("vw-zin").addEventListener("click", () => zoomBy(0.5));
 $("vw-zout").addEventListener("click", () => zoomBy(2));
-$("vw-gain").addEventListener("click", () => (gain = 1));
+$("vw-gain").addEventListener("click", () => {
+  gain = 1;
+  settings.autoGain = false;
+  saveSettings();
+  renderViewMenu();
+});
+$("vw-auto").addEventListener("click", () => {
+  settings.autoGain = !settings.autoGain;
+  if (!settings.autoGain) gain = 1;
+  saveSettings();
+  renderViewMenu();
+});
+function renderViewMenu() {
+  $("vw-auto").setAttribute("aria-checked", String(settings.autoGain));
+}
+renderViewMenu();
+
+/** Warns when the input has stayed very quiet for 3 s: a gain knob at zero or the wrong input. */
+function renderWeak() {
+  const el = $("wv-weak");
+  if (!node || performance.now() - inputSince < 3000 || !recentPeaks.length) {
+    el.hidden = true;
+    return;
+  }
+  const pk = Math.max(...recentPeaks.map((p) => p[1]));
+  el.hidden = pk > -40;
+  if (!el.hidden)
+    el.textContent = `Сигнал очень слабый: пик ${pk < -100 ? "−∞" : Math.round(pk)} дБ. Поднимите Gain на звуковой карте (вход INST для гитары) или «Усиление входа» здесь; проверьте «Канал».`;
+}
+
+const inGain = $<HTMLInputElement>("wv-ingain");
+inGain.value = String(settings.inGainDb);
+const showInGain = () => ($("wv-ingain-v").textContent = `+${settings.inGainDb} дБ`);
+showInGain();
+inGain.addEventListener("input", () => {
+  settings.inGainDb = Number(inGain.value);
+  saveSettings();
+  showInGain();
+  node?.port.postMessage({ gain: 10 ** (settings.inGainDb / 20) });
+});
 $("ed-desel").addEventListener("click", KEYS.Escape);
 $("wv-live").addEventListener("click", () => {
   follow = true;
@@ -1109,6 +1216,7 @@ function ensureMonitor(): Promise<Monitor | null> {
     try {
       monitor = await Monitor.create(ctx, settings.mon, moStatus);
       node?.connect(monitor.input);
+      routeTap(monitor.wet);
       return monitor;
     } catch (e) {
       console.error(e);
@@ -1166,6 +1274,8 @@ async function startMonitor() {
   box.disabled = true;
   const m = await ensureMonitor();
   box.disabled = false;
+  // Recording waits for the effect chain; if it failed, it records the plain input.
+  if (node) $<HTMLButtonElement>("wv-rec").disabled = false;
   if (!m) {
     box.checked = false;
     return;

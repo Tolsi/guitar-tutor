@@ -251,6 +251,7 @@
             <hr />
             <button role="menuitem" id="vw-zin">Приблизить<kbd>⌘ колесо</kbd></button>
             <button role="menuitem" id="vw-zout">Отдалить<kbd>⌘ колесо</kbd></button>
+            <button role="menuitemcheckbox" id="vw-auto" aria-checked="true">Автомасштаб по высоте</button>
             <button role="menuitem" id="vw-gain">Сбросить усиление по высоте<kbd>⌥ колесо</kbd></button>
           </div>
         </div>
@@ -279,6 +280,10 @@
               <option value="1">Канал 2</option>
             </select>
           </label>
+          <label class="field">
+            <span>Усиление входа <b id="wv-ingain-v" class="mono"></b></span>
+            <input id="wv-ingain" type="range" min="0" max="40" step="1" />
+          </label>
         </div>
       </div>
 
@@ -300,6 +305,7 @@
             <b id="wv-time" class="mono wv-time">0:00.000</b>
             <div class="level wv-level" title="Уровень входа"><i id="wv-level"></i></div>
           </div>
+          <p id="wv-weak" class="wv-weak" role="alert" hidden></p>
           <div class="wv-editline"><span id="ed-sel" class="mono"></span><span id="wv-edit-status"></span></div>
           <div class="wv-plot">
             <canvas id="wv-canvas" class="wv-canvas"></canvas>

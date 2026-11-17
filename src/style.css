@@ -525,9 +525,9 @@ kbd {
 .menu-pop button:hover:not(:disabled), .menu-pop button:focus-visible { background: var(--accent); color: var(--stage); outline: none; }
 .menu-pop button:disabled { color: var(--muted); opacity: 0.6; cursor: default; }
 .menu-pop button kbd { background: none; border: 0; padding: 0; color: inherit; opacity: 0.7; font-size: 0.75rem; }
-.menu-pop button[role="menuitemradio"]::before { content: ""; width: 14px; flex: none; margin-right: -16px; }
+.menu-pop button[role="menuitemradio"]::before, .menu-pop button[role="menuitemcheckbox"]::before { content: ""; width: 14px; flex: none; margin-right: -16px; }
 .menu-pop button[aria-checked="true"]::before { content: "✓"; }
-.menu-pop button[role="menuitemradio"] { padding-left: 26px; justify-content: flex-start; }
+.menu-pop button[role="menuitemradio"], .menu-pop button[role="menuitemcheckbox"] { padding-left: 26px; justify-content: flex-start; }
 .menu-pop hr { border: 0; border-top: 1px solid var(--line); margin: 4px 6px; }
 .menu-field { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; padding: 6px 10px; font-size: 0.88rem; }
 .menu-field label { display: flex; align-items: center; gap: 6px; }
@@ -537,3 +537,4 @@ kbd {
 .wv-editline { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 0.85rem; color: var(--muted); min-height: 1.3em; }
 .wv-editline #ed-sel { color: var(--ink); }
 .pm-note:disabled { opacity: 0.6; cursor: default; }
+.wv-weak { margin: 0; padding: 8px 12px; border-radius: 8px; border-left: 4px solid var(--warn); background: color-mix(in srgb, var(--warn) 14%, transparent); font-size: 0.88rem; }
