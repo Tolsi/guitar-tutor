@@ -11,13 +11,15 @@ const SETTINGS_KEY = "wave-settings";
 interface Settings {
   deviceId: string;
   outId: string;
+  /** Headphone monitoring through the amp; also used for playback. */
+  monOn: boolean;
   exercise: "free" | "pm";
   pmLimMs: number;
   attLimMs: number;
   mon: MonitorSettings;
 }
 function loadSettings(): Settings {
-  const def = (): Settings => ({ deviceId: "", outId: "", exercise: "free", pmLimMs: 350, attLimMs: 40, mon: { ...MONITOR_DEFAULTS } });
+  const def = (): Settings => ({ deviceId: "", outId: "", monOn: true, exercise: "free", pmLimMs: 350, attLimMs: 40, mon: { ...MONITOR_DEFAULTS } });
   try {
     const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? "{}");
     const d = def();
@@ -162,6 +164,7 @@ async function openInput() {
     mute.gain.value = 0;
     source.connect(node).connect(mute).connect(ctx.destination);
     if (monitor) source.connect(monitor.input);
+    else if (settings.monOn) void startMonitor();
 
     const track = stream.getAudioTracks()[0];
     status.textContent = `Вход: ${track.label || "микрофон"}, ${sr / 1000} кГц`;
@@ -762,13 +765,9 @@ function monitorChanged() {
   monitor?.apply();
 }
 
-$<HTMLInputElement>("mo-on").addEventListener("change", async (e) => {
-  const box = e.target as HTMLInputElement;
-  if (!box.checked) {
-    monitor?.setEnabled(false);
-    $("mo-lat").textContent = "";
-    return;
-  }
+/** Brings up the amp chain and turns it on, if the switch is still on by then. */
+async function startMonitor() {
+  const box = $<HTMLInputElement>("mo-on");
   box.disabled = true;
   const m = await ensureMonitor();
   box.disabled = false;
@@ -777,7 +776,19 @@ $<HTMLInputElement>("mo-on").addEventListener("change", async (e) => {
     return;
   }
   m.setEnabled(box.checked);
-  $("mo-lat").textContent = `задержка ≈ ${m.latencyMs()} мс`;
+  $("mo-lat").textContent = box.checked ? `задержка ≈ ${m.latencyMs()} мс` : "";
+}
+
+$<HTMLInputElement>("mo-on").addEventListener("change", (e) => {
+  const box = e.target as HTMLInputElement;
+  settings.monOn = box.checked;
+  saveSettings();
+  if (!box.checked) {
+    monitor?.setEnabled(false);
+    $("mo-lat").textContent = "";
+    return;
+  }
+  void startMonitor();
 });
 
 moAmp.addEventListener("change", async () => {
@@ -830,8 +841,8 @@ for (const sl of SLIDERS)
     monitorChanged();
   });
 
-// Browsers restore checkbox state on reload; monitoring always starts off.
-$<HTMLInputElement>("mo-on").checked = false;
+// Browsers restore checkbox state on reload; the saved setting wins. Sound starts once the input is on.
+$<HTMLInputElement>("mo-on").checked = settings.monOn;
 renderMonitorControls();
 
 // ---------- palm mute exercise ----------
