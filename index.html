@@ -275,6 +275,10 @@
             <p class="note">Подбирает усиление так, чтобы пики игры были около целевого уровня. Меняется только между дублями (во время записи — лишь убавляется при перегрузе), чтобы не искажать затухание нот.</p>
             <label class="field"><span>Целевой пик <b id="st-target-v" class="mono"></b></span><input id="st-target" type="range" min="-24" max="-3" step="1" /></label>
             <label class="field"><span>Ручное усиление <b id="st-ingain-v" class="mono"></b></span><input id="st-ingain" type="range" min="0" max="50" step="1" /></label>
+            <label class="check"><input id="st-gate" type="checkbox" /> Шумодав (гейт)</label>
+            <p class="note">Глушит вход в паузах, чтобы усиление и дисторшн не раздували фоновый шум. Открывается, когда сигнал громче шума входа на порог.</p>
+            <label class="field"><span>Порог гейта над шумом <b id="st-gatemargin-v" class="mono"></b></span><input id="st-gatemargin" type="range" min="4" max="30" step="1" /></label>
+            <p id="st-noise" class="note mono"></p>
             <label class="check"><input id="st-mon" type="checkbox" /> Звук в наушники при включении входа</label>
           </fieldset>
           <fieldset>

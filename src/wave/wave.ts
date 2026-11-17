@@ -28,6 +28,9 @@ interface Settings {
   /** Auto-level: raise or lower the input gain so played notes peak near targetDb. */
   autoInGain: boolean;
   targetDb: number;
+  /** Noise gate after the input gain, opening this many dB above the measured noise floor. */
+  gateOn: boolean;
+  gateMarginDb: number;
   /** Fit the wave height to the visible peak. */
   autoGain: boolean;
   mon: MonitorSettings;
@@ -46,6 +49,8 @@ function loadSettings(): Settings {
     inGainDb: 0,
     autoInGain: true,
     targetDb: -12,
+    gateOn: true,
+    gateMarginDb: 10,
     autoGain: true,
     mon: { ...MONITOR_DEFAULTS },
   });
@@ -191,10 +196,26 @@ function autoLevel(pk: number, dt: number, now: number) {
   for (const [t, v] of rawPeaks) if (t >= now - 4000) loud = Math.max(loud, v);
   // Only adjust while something is being played (12 dB above the background).
   if (loud < 1e-6 || loud < floor * 4) return;
-  const want = Math.min(50, Math.max(0, settings.targetDb - 20 * Math.log10(loud)));
+  let want = settings.targetDb - 20 * Math.log10(loud);
+  // Never lift the hiss above NOISE_CEIL_DB: past that, more gain is mostly more noise.
+  if (noiseDb !== null) want = Math.min(want, NOISE_CEIL_DB - noiseDb);
+  want = Math.min(50, Math.max(0, want));
   const diff = want - settings.inGainDb;
   if (Math.abs(diff) < 1.5) return;
   setInGain(settings.inGainDb + Math.max(-10 * dt, Math.min(6 * dt, diff)));
+}
+
+/** Highest level the input noise may reach after auto-gain, dB RMS. */
+const NOISE_CEIL_DB = -60;
+
+function showNoise() {
+  const el = document.getElementById("st-noise");
+  if (!el) return;
+  el.textContent =
+    noiseDb === null
+      ? "Шум входа ещё не измерен — включите вход."
+      : `Шум входа: ${Math.round(noiseDb)} дБ, после усиления ${Math.round(noiseDb + settings.inGainDb)} дБ. ` +
+        `Автоусиление не поднимает шум выше ${NOISE_CEIL_DB} дБ.`;
 }
 
 function setInGain(db: number) {
@@ -294,7 +315,12 @@ async function openInput() {
     });
     node.port.onmessage = (e: MessageEvent<Float32Array | ChannelReport>) =>
       e.data instanceof Float32Array ? onInputBlock(e.data) : onChannels(e.data);
-    node.port.postMessage({ mode: settings.channel, gain: 10 ** (settings.inGainDb / 20) });
+    node.port.postMessage({
+      mode: settings.channel,
+      gain: 10 ** (settings.inGainDb / 20),
+      gate: settings.gateOn,
+      gateMarginDb: settings.gateMarginDb,
+    });
     const mute = c.createGain();
     mute.gain.value = 0;
     source.connect(node).connect(mute).connect(c.destination);
@@ -331,8 +357,15 @@ interface ChannelReport {
   sel: number;
   channels: number;
   db: number[];
+  /** Noise floor of the raw input (mean square, dB), null until measured. */
+  floorDb: number | null;
+  gateOpen: boolean;
 }
+/** Raw input noise floor, dB RMS. */
+let noiseDb: number | null = null;
 function onChannels(r: ChannelReport) {
+  noiseDb = r.floorDb;
+  showNoise();
   const sel = $<HTMLSelectElement>("wv-chan");
   sel.disabled = r.channels < 2;
   const auto = sel.options[0];
@@ -1250,6 +1283,8 @@ const FIELDS: Field[] = [
   { id: "st-autoin", get: () => settings.autoInGain, set: (v) => (settings.autoInGain = v as boolean) },
   { id: "st-target", get: () => String(settings.targetDb), set: (v) => (settings.targetDb = Number(v)), fmt: (v) => `${v} дБ` },
   { id: "st-ingain", get: () => String(Math.round(settings.inGainDb)), set: (v) => setInGain(Number(v)), fmt: (v) => `+${v} дБ` },
+  { id: "st-gate", get: () => settings.gateOn, set: (v) => (settings.gateOn = v as boolean) },
+  { id: "st-gatemargin", get: () => String(settings.gateMarginDb), set: (v) => (settings.gateMarginDb = Number(v)), fmt: (v) => `+${v} дБ` },
   { id: "st-autoheight", get: () => settings.autoGain, set: (v) => ((settings.autoGain = v as boolean), v || (gain = 1)) },
   { id: "st-mon", get: () => settings.monOn, set: (v) => (settings.monOn = v as boolean) },
   { id: "st-bpm", get: () => String(settings.bpm), set: (v) => (settings.bpm = Math.min(300, Math.max(30, Number(v) || 120))) },
@@ -1268,6 +1303,9 @@ function fillSettings() {
   }
   $<HTMLInputElement>("st-ingain").disabled = settings.autoInGain;
   $<HTMLInputElement>("st-target").disabled = !settings.autoInGain;
+  $<HTMLInputElement>("st-gatemargin").disabled = !settings.gateOn;
+  node?.port.postMessage({ gate: settings.gateOn, gateMarginDb: settings.gateMarginDb });
+  showNoise();
 }
 
 for (const f of FIELDS) {
