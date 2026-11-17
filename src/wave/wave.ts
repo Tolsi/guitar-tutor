@@ -201,8 +201,9 @@ function autoLevel(pk: number, dt: number, now: number) {
   if (noiseDb !== null) want = Math.min(want, NOISE_CEIL_DB - noiseDb);
   want = Math.min(50, Math.max(0, want));
   const diff = want - settings.inGainDb;
-  if (Math.abs(diff) < 1.5) return;
-  setInGain(settings.inGainDb + Math.max(-10 * dt, Math.min(6 * dt, diff)));
+  // Only ever turns down: the gain set by hand is the ceiling, auto-level never raises it (nor the hiss).
+  if (diff > -1.5) return;
+  setInGain(settings.inGainDb + Math.max(-10 * dt, diff));
 }
 
 /** Highest level the input noise may reach after auto-gain, dB RMS. */
@@ -1270,14 +1271,19 @@ function showInGain() {
   shownGain = text;
   $("wv-ingain-v").textContent = text;
   inGain.value = String(Math.round(settings.inGainDb));
-  inGain.disabled = settings.autoInGain;
-  inGain.title = settings.autoInGain ? "Подбирается автоматически; отключить — Файл → Настройки" : "";
+  inGain.title = settings.autoInGain ? "Автоусиление только убавляет его, если игра громче целевого пика" : "";
 }
 showInGain();
 inGain.addEventListener("input", () => {
   setInGain(Number(inGain.value));
   saveSettings();
   showInGain();
+});
+$("wv-ingain-reset").addEventListener("click", () => {
+  setInGain(0);
+  saveSettings();
+  showInGain();
+  if (dlg.open) fillSettings();
 });
 
 // ---------- settings dialog ----------
@@ -1311,7 +1317,6 @@ function fillSettings() {
     else el.value = v as string;
     if (f.fmt) $(`${f.id}-v`).textContent = f.fmt(el.value);
   }
-  $<HTMLInputElement>("st-ingain").disabled = settings.autoInGain;
   $<HTMLInputElement>("st-target").disabled = !settings.autoInGain;
   $<HTMLInputElement>("st-gatemargin").disabled = !settings.gateOn;
   node?.port.postMessage({ gate: settings.gateOn, gateMarginDb: settings.gateMarginDb });
