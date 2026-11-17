@@ -222,6 +222,14 @@
             <span>Вход</span>
             <select id="wv-device" disabled><option>—</option></select>
           </label>
+          <label class="field">
+            <span>Канал</span>
+            <select id="wv-chan" disabled>
+              <option value="auto">Авто</option>
+              <option value="0">Канал 1</option>
+              <option value="1">Канал 2</option>
+            </select>
+          </label>
           <button id="wv-clear" class="btn ghost">Очистить</button>
         </div>
       </div>
@@ -269,7 +277,7 @@
         <section id="pm-card" class="lg-card" hidden>
           <div class="block-head">
             <h3>Упражнение: palm mute</h3>
-            <span class="hint">ребро ладони на струнах у подставки, нота короткая и глухая · дисторшн включён на 100%</span>
+            <span class="hint">ребро ладони на струнах у подставки, нота короткая и глухая · дисторшн «Дисторшн» на 100%</span>
           </div>
           <div class="pm-top">
             <div id="pm-verdict" class="pm-verdict" data-state="none">

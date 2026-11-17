@@ -1,5 +1,6 @@
 import workletUrl from "./capture-worklet.ts?worker&url";
 import { SampleStore } from "./store";
+import type { ChannelMode } from "./capture-worklet";
 import { PmAnalyzer, checkPitches, isPalmMuted, type PitchCheck, type PmNote } from "./pm";
 import { AMPS, MONITOR_DEFAULTS, Monitor, type DistType, type MonitorSettings } from "./monitor";
 
@@ -11,6 +12,7 @@ const SETTINGS_KEY = "wave-settings";
 interface Settings {
   deviceId: string;
   outId: string;
+  channel: ChannelMode;
   /** Headphone monitoring through the amp; also used for playback. */
   monOn: boolean;
   exercise: "free" | "pm";
@@ -19,7 +21,7 @@ interface Settings {
   mon: MonitorSettings;
 }
 function loadSettings(): Settings {
-  const def = (): Settings => ({ deviceId: "", outId: "", monOn: true, exercise: "free", pmLimMs: 350, attLimMs: 40, mon: { ...MONITOR_DEFAULTS } });
+  const def = (): Settings => ({ deviceId: "", outId: "", channel: "auto", monOn: true, exercise: "free", pmLimMs: 350, attLimMs: 40, mon: { ...MONITOR_DEFAULTS } });
   try {
     const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? "{}");
     const d = def();
@@ -136,6 +138,8 @@ async function openInput() {
         echoCancellation: false,
         noiseSuppression: false,
         autoGainControl: false,
+        // Interfaces often carry the guitar on input 2; ask for both channels and pick one.
+        channelCount: { ideal: 2 },
       },
     });
     if (!ctx) {
@@ -155,15 +159,19 @@ async function openInput() {
     node = new AudioWorkletNode(ctx, "wave-capture", {
       numberOfInputs: 1,
       numberOfOutputs: 1,
-      channelCount: 1,
+      outputChannelCount: [1],
+      channelCount: 2,
       channelCountMode: "explicit",
-      channelInterpretation: "speakers",
+      channelInterpretation: "discrete",
     });
-    node.port.onmessage = (e: MessageEvent<Float32Array>) => onBlock(e.data);
+    node.port.onmessage = (e: MessageEvent<Float32Array | ChannelReport>) =>
+      e.data instanceof Float32Array ? onBlock(e.data) : onChannels(e.data);
+    node.port.postMessage({ mode: settings.channel });
     const mute = ctx.createGain();
     mute.gain.value = 0;
     source.connect(node).connect(mute).connect(ctx.destination);
-    if (monitor) source.connect(monitor.input);
+    // The monitor hears the same chosen channel as the recording.
+    if (monitor) node.connect(monitor.input);
     else if (settings.monOn) void startMonitor();
 
     const track = stream.getAudioTracks()[0];
@@ -182,6 +190,24 @@ async function openInput() {
         : err.name === "NotFoundError"
           ? "Аудиовход не найден. Подключите звуковую карту или микрофон."
           : `Не удалось включить вход: ${err.message}`;
+  }
+}
+
+interface ChannelReport {
+  sel: number;
+  channels: number;
+  db: number[];
+}
+function onChannels(r: ChannelReport) {
+  const sel = $<HTMLSelectElement>("wv-chan");
+  sel.disabled = r.channels < 2;
+  const auto = sel.options[0];
+  auto.textContent = r.channels < 2 ? "Один канал" : `Авто (сейчас ${r.sel + 1})`;
+  // Show per-channel levels so a silent input is obvious.
+  for (let c = 0; c < 2; c++) {
+    const o = sel.options[c + 1];
+    const db = r.db[c];
+    o.textContent = `Канал ${c + 1}${db !== undefined ? ` · ${db < -90 ? "тишина" : `${Math.round(db)} дБ`}` : ""}`;
   }
 }
 
@@ -691,6 +717,13 @@ $("wv-live").addEventListener("click", () => {
   follow = true;
   clampView();
 });
+const chanSel = $<HTMLSelectElement>("wv-chan");
+chanSel.value = String(settings.channel);
+chanSel.addEventListener("change", () => {
+  settings.channel = chanSel.value === "auto" ? "auto" : (Number(chanSel.value) as 0 | 1);
+  saveSettings();
+  node?.port.postMessage({ mode: settings.channel });
+});
 $("wv-device").addEventListener("change", (e) => {
   settings.deviceId = (e.target as HTMLSelectElement).value;
   saveSettings();
@@ -713,7 +746,7 @@ function ensureMonitor(): Promise<Monitor | null> {
     if (!ctx || !source) return null;
     try {
       monitor = await Monitor.create(ctx, settings.mon, moStatus);
-      source.connect(monitor.input);
+      node?.connect(monitor.input);
       return monitor;
     } catch (e) {
       console.error(e);
@@ -1036,9 +1069,10 @@ function applyExercise() {
   if (isPm) renderPm();
 }
 
-/** Palm mute is practised on a driven tone: the pedal goes on at full drive. */
+/** Palm mute is practised on a driven tone: the distortion pedal goes on at full drive. */
 function pmTone() {
   settings.mon.dist = true;
+  settings.mon.distType = "dist";
   settings.mon.drive = 1;
   monitorChanged();
 }
