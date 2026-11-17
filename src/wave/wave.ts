@@ -1,5 +1,6 @@
 import workletUrl from "./capture-worklet.ts?worker&url";
 import { SampleStore } from "./store";
+import { AMPS, MONITOR_DEFAULTS, Monitor, type DistType, type MonitorSettings } from "./monitor";
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -8,12 +9,16 @@ const SETTINGS_KEY = "wave-settings";
 
 interface Settings {
   deviceId: string;
+  mon: MonitorSettings;
 }
 function loadSettings(): Settings {
+  const def = (): Settings => ({ deviceId: "", mon: { ...MONITOR_DEFAULTS } });
   try {
-    return { deviceId: "", ...JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? "{}") };
+    const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? "{}");
+    const d = def();
+    return { ...d, ...saved, mon: { ...d.mon, ...(saved.mon ?? {}) } };
   } catch {
-    return { deviceId: "" };
+    return def();
   }
 }
 function saveSettings() {
@@ -24,6 +29,8 @@ function saveSettings() {
   }
 }
 const settings = loadSettings();
+// A custom .nam file is not kept between visits.
+if (settings.mon.amp === "file") settings.mon.amp = MONITOR_DEFAULTS.amp;
 
 let ctx: AudioContext | null = null;
 let stream: MediaStream | null = null;
@@ -123,7 +130,12 @@ async function openInput() {
       },
     });
     if (!ctx) {
-      ctx = new AudioContext({ latencyHint: "interactive" });
+      // NAM models are trained at 48 kHz.
+      try {
+        ctx = new AudioContext({ latencyHint: "interactive", sampleRate: 48000 });
+      } catch {
+        ctx = new AudioContext({ latencyHint: "interactive" });
+      }
       await ctx.audioWorklet.addModule(workletUrl);
       sr = ctx.sampleRate;
       store = new SampleStore(MAX_SECONDS * sr);
@@ -141,6 +153,7 @@ async function openInput() {
     const mute = ctx.createGain();
     mute.gain.value = 0;
     source.connect(node).connect(mute).connect(ctx.destination);
+    if (monitor) source.connect(monitor.input);
 
     const track = stream.getAudioTracks()[0];
     status.textContent = `Вход: ${track.label || "микрофон"}, ${sr / 1000} кГц`;
@@ -255,7 +268,8 @@ function togglePlay() {
   buf.copyToChannel(data, 0);
   const src = ctx.createBufferSource();
   src.buffer = buf;
-  src.connect(ctx.destination);
+  // With monitoring on, the take plays back through the amp too.
+  src.connect(monitor?.enabled ? monitor.input : ctx.destination);
   src.onended = () => stopPlay();
   void ctx.resume();
   src.start();
@@ -384,7 +398,7 @@ function drawWave() {
   } else {
     g.fillStyle = col.text;
     g.textAlign = "center";
-    g.fillText(ctx ? "Тишина. Сыграйте что-нибудь." : "Включите аудиовход, чтобы увидеть волну.", W / 2, mid - 20 * dpr);
+    g.fillText(ctx ? "Нажмите ● или клавишу R, чтобы записать." : "Включите аудиовход, чтобы увидеть волну.", W / 2, mid - 20 * dpr);
     g.textAlign = "start";
   }
 
@@ -624,3 +638,138 @@ $("wv-device").addEventListener("change", (e) => {
   saveSettings();
   if (ctx) void openInput();
 });
+
+// ---------- monitoring (amp + distortion) ----------
+
+let monitor: Monitor | null = null;
+let monitorInit: Promise<Monitor | null> | null = null;
+const moStatus = (text: string, busy = false) => {
+  const el = $("mo-status");
+  el.textContent = text;
+  el.classList.toggle("busy", busy);
+};
+
+function ensureMonitor(): Promise<Monitor | null> {
+  monitorInit ??= (async () => {
+    if (!source) await openInput();
+    if (!ctx || !source) return null;
+    try {
+      monitor = await Monitor.create(ctx, settings.mon, moStatus);
+      source.connect(monitor.input);
+      return monitor;
+    } catch (e) {
+      console.error(e);
+      moStatus(`Не удалось запустить усилитель: ${(e as Error).message}`);
+      return null;
+    }
+  })();
+  return monitorInit.then((m) => {
+    if (!m) monitorInit = null;
+    return m;
+  });
+}
+
+const moAmp = $<HTMLSelectElement>("mo-amp");
+moAmp.replaceChildren(
+  ...[...AMPS.map((a) => [a.id, a.name]), ["none", "Без усилителя"], ["file", "Свой файл .nam…"]].map(([v, t]) => {
+    const o = document.createElement("option");
+    o.value = v;
+    o.textContent = t;
+    return o;
+  }),
+);
+let customFile: File | null = null;
+
+const SLIDERS: { id: string; key: "inDb" | "volDb" | "drive" | "tone" | "levelDb"; fmt: (v: number) => string }[] = [
+  { id: "mo-in", key: "inDb", fmt: (v) => `${v > 0 ? "+" : ""}${v} дБ` },
+  { id: "mo-vol", key: "volDb", fmt: (v) => `${v} дБ` },
+  { id: "mo-drive", key: "drive", fmt: (v) => `${Math.round(v * 100)}%` },
+  { id: "mo-tone", key: "tone", fmt: (v) => `${Math.round(v * 100)}%` },
+  { id: "mo-level", key: "levelDb", fmt: (v) => `${v > 0 ? "+" : ""}${v} дБ` },
+];
+
+function renderMonitorControls() {
+  const m = settings.mon;
+  moAmp.value = m.amp === "file" && !customFile ? MONITOR_DEFAULTS.amp : m.amp;
+  $<HTMLInputElement>("mo-cab").checked = m.cab;
+  $<HTMLInputElement>("mo-dist").checked = m.dist;
+  $<HTMLSelectElement>("mo-type").value = m.distType;
+  for (const sl of SLIDERS) {
+    $<HTMLInputElement>(sl.id).value = String(m[sl.key]);
+    $(`${sl.id}-v`).textContent = sl.fmt(m[sl.key]);
+  }
+  for (const id of ["mo-type", "mo-drive", "mo-tone", "mo-level"]) $<HTMLInputElement>(id).disabled = !m.dist;
+}
+
+function monitorChanged() {
+  saveSettings();
+  renderMonitorControls();
+  monitor?.apply();
+}
+
+$<HTMLInputElement>("mo-on").addEventListener("change", async (e) => {
+  const box = e.target as HTMLInputElement;
+  if (!box.checked) {
+    monitor?.setEnabled(false);
+    $("mo-lat").textContent = "";
+    return;
+  }
+  box.disabled = true;
+  const m = await ensureMonitor();
+  box.disabled = false;
+  if (!m) {
+    box.checked = false;
+    return;
+  }
+  m.setEnabled(box.checked);
+  $("mo-lat").textContent = `задержка ≈ ${m.latencyMs()} мс`;
+});
+
+moAmp.addEventListener("change", async () => {
+  const v = moAmp.value;
+  if (v === "file") {
+    $<HTMLInputElement>("mo-file").click();
+    return;
+  }
+  settings.mon.amp = v;
+  const preset = AMPS.find((a) => a.id === v);
+  if (preset) settings.mon.cab = !preset.hasCab;
+  monitorChanged();
+  await monitor?.loadAmp(v);
+});
+
+const moFile = $<HTMLInputElement>("mo-file");
+moFile.addEventListener("change", async () => {
+  const f = moFile.files?.[0];
+  moFile.value = "";
+  if (!f) return renderMonitorControls();
+  customFile = f;
+  settings.mon.amp = "file";
+  settings.mon.cab = true;
+  monitorChanged();
+  const m = monitor ?? (await ensureMonitor());
+  await m?.loadAmp("file", f);
+});
+moFile.addEventListener("cancel", () => renderMonitorControls());
+
+$<HTMLInputElement>("mo-cab").addEventListener("change", (e) => {
+  settings.mon.cab = (e.target as HTMLInputElement).checked;
+  monitorChanged();
+});
+$<HTMLInputElement>("mo-dist").addEventListener("change", (e) => {
+  settings.mon.dist = (e.target as HTMLInputElement).checked;
+  monitorChanged();
+});
+$<HTMLSelectElement>("mo-type").addEventListener("change", (e) => {
+  settings.mon.distType = (e.target as HTMLSelectElement).value as DistType;
+  monitorChanged();
+});
+for (const sl of SLIDERS)
+  $<HTMLInputElement>(sl.id).addEventListener("input", (e) => {
+    settings.mon[sl.key] = Number((e.target as HTMLInputElement).value);
+    monitorChanged();
+  });
+
+// Browsers restore checkbox state on reload; monitoring always starts off.
+$<HTMLInputElement>("mo-on").checked = false;
+renderMonitorControls();

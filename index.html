@@ -258,6 +258,42 @@
           </p>
           <p id="wv-status" class="note" role="status">Вход выключен.</p>
         </section>
+
+        <section class="lg-card">
+          <div class="block-head"><h3>Озвучивание</h3><span id="mo-lat" class="hint mono"></span></div>
+          <div class="amp-row">
+            <label class="switch"><input id="mo-on" type="checkbox" autocomplete="off" /><span>Звук в наушники</span></label>
+            <label class="field">
+              <span>Усилитель (NAM)</span>
+              <select id="mo-amp"></select>
+            </label>
+            <input id="mo-file" type="file" accept=".nam,application/json" hidden />
+            <label class="check"><input id="mo-cab" type="checkbox" /> Кабинет</label>
+            <label class="field"><span>Вход <b id="mo-in-v" class="mono"></b></span><input id="mo-in" type="range" min="-12" max="24" step="1" /></label>
+            <label class="field"><span>Громкость <b id="mo-vol-v" class="mono"></b></span><input id="mo-vol" type="range" min="-40" max="0" step="1" /></label>
+          </div>
+          <div class="amp-row">
+            <label class="switch"><input id="mo-dist" type="checkbox" /><span>Дисторшн</span></label>
+            <label class="field">
+              <span>Тип</span>
+              <select id="mo-type">
+                <option value="od">Овердрайв</option>
+                <option value="dist">Дисторшн</option>
+                <option value="fuzz">Фузз</option>
+              </select>
+            </label>
+            <label class="field"><span>Перегруз <b id="mo-drive-v" class="mono"></b></span><input id="mo-drive" type="range" min="0" max="1" step="0.01" /></label>
+            <label class="field"><span>Тон <b id="mo-tone-v" class="mono"></b></span><input id="mo-tone" type="range" min="0" max="1" step="0.01" /></label>
+            <label class="field"><span>Уровень <b id="mo-level-v" class="mono"></b></span><input id="mo-level" type="range" min="-30" max="6" step="1" /></label>
+          </div>
+          <p id="mo-status" class="note" role="status">Включите «Звук в наушники», чтобы слышать гитару через усилитель.</p>
+          <p class="note">
+            Усилители — снимки Neural Amp Modeler от сообщества (коллекция
+            <a href="https://github.com/pelennor2170/NAM_models" target="_blank" rel="noopener">pelennor2170/NAM_models</a>, GPL-3.0),
+            скачиваются с GitHub при выборе. Можно загрузить свою модель .nam, например с tone3000.com.
+            Играйте в наушниках: звук из колонок попадёт обратно в микрофон. Дисторшн стоит перед усилителем, как педаль.
+          </p>
+        </section>
       </main>
     </div>
     <script type="module" src="/src/main.ts"></script>
