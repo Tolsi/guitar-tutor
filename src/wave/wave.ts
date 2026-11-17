@@ -1,13 +1,16 @@
 import workletUrl from "./capture-worklet.ts?worker&url";
 import { SampleStore } from "./store";
 import type { ChannelMode } from "./capture-worklet";
-import { PmAnalyzer, checkPitches, isPalmMuted, type PitchCheck, type PmNote } from "./pm";
+import { checkPitches, isPalmMuted, type PitchCheck, type PmNote } from "./pm";
 import { AMPS, MONITOR_DEFAULTS, Monitor, type DistType, type MonitorSettings } from "./monitor";
+import { Timeline, clipEnd, encodeWav, type Clip, type Take } from "./timeline";
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 
 const MAX_SECONDS = 300;
 const SETTINGS_KEY = "wave-settings";
+
+type GridDiv = "off" | "1" | "4" | "8" | "16";
 
 interface Settings {
   deviceId: string;
@@ -18,10 +21,23 @@ interface Settings {
   exercise: "free" | "pm";
   pmLimMs: number;
   attLimMs: number;
+  bpm: number;
+  grid: GridDiv;
   mon: MonitorSettings;
 }
 function loadSettings(): Settings {
-  const def = (): Settings => ({ deviceId: "", outId: "", channel: "auto", monOn: true, exercise: "free", pmLimMs: 350, attLimMs: 40, mon: { ...MONITOR_DEFAULTS } });
+  const def = (): Settings => ({
+    deviceId: "",
+    outId: "",
+    channel: "auto",
+    monOn: true,
+    exercise: "free",
+    pmLimMs: 350,
+    attLimMs: 40,
+    bpm: 120,
+    grid: "4",
+    mon: { ...MONITOR_DEFAULTS },
+  });
   try {
     const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? "{}");
     const d = def();
@@ -45,23 +61,28 @@ let ctx: AudioContext | null = null;
 let stream: MediaStream | null = null;
 let source: MediaStreamAudioSourceNode | null = null;
 let node: AudioWorkletNode | null = null;
-let store: SampleStore | null = null;
+let tl: Timeline | null = null;
 let sr = 48000;
 
 let visible = false;
 let recording = false;
-/** Keep the right edge of the view on the newest sample. */
+/** The take being recorded and its clip. */
+let rec: { take: Take; clip: Clip } | null = null;
+/** Keep the right edge of the view on the recording head. */
 let follow = true;
 let viewStart = 0;
 let viewSpan = 3;
 let gain = 1;
 let levelDb = -Infinity;
-let hoverX: number | null = null;
+let hover: { x: number; y: number } | null = null;
 let play: { src: AudioBufferSourceNode; from: number; at: number } | null = null;
 /** Where Space starts playback (set by a click on the wave). */
 let marker: number | null = null;
 /** Where playback was paused; Space resumes from here until a new marker is set. */
 let pausedAt: number | null = null;
+/** Time range selected for playback and export, seconds. */
+let selection: { a: number; b: number } | null = null;
+let selClip: Clip | null = null;
 
 const wave = $<HTMLCanvasElement>("wv-canvas");
 const over = $<HTMLCanvasElement>("wv-over");
@@ -75,6 +96,7 @@ interface Colors {
   text: string;
   play: string;
   warn: string;
+  box: string;
 }
 function readColors(): Colors {
   const cs = getComputedStyle(document.documentElement);
@@ -88,6 +110,7 @@ function readColors(): Colors {
     text: v("--scope-text"),
     play: v("--scope-play"),
     warn: v("--scope-warn"),
+    box: v("--scope-box"),
   };
 }
 let col = readColors();
@@ -101,14 +124,16 @@ export function setWaveVisible(v: boolean) {
   }
 }
 
-const total = () => (store ? store.length / sr : 0);
+const total = () => (tl ? tl.length / sr : 0);
+/** Where new audio is arriving (the end of the recording clip), or the end of the timeline. */
+const head = () => (rec ? clipEnd(rec.clip) / sr : total());
 
 function clampView() {
   const t = total();
   // While live (or empty) allow a window wider than the recording so it can fill up.
   const maxSpan = Math.max(t, recording || t === 0 ? 10 : 0.01);
   viewSpan = Math.min(Math.max(viewSpan, 16 / sr), maxSpan);
-  if (follow) viewStart = Math.max(0, t - viewSpan);
+  if (follow) viewStart = Math.max(0, head() - viewSpan);
   else viewStart = Math.min(Math.max(viewStart, 0), Math.max(0, t - viewSpan));
 }
 
@@ -117,12 +142,31 @@ function onBlock(d: Float32Array) {
   for (let i = 0; i < d.length; i++) pk = Math.max(pk, Math.abs(d[i]));
   const db = pk > 0 ? 20 * Math.log10(pk) : -Infinity;
   levelDb = db > levelDb ? db : levelDb - 0.6;
-  if (!recording || !store) return;
-  store.push(d);
-  if (store.full) {
+  if (!recording || !rec) return;
+  const st = rec.take.store;
+  st.push(d);
+  rec.clip.to = st.length;
+  if (st.full) {
     setRecording(false);
-    $("wv-status").textContent = `Достигнут предел записи ${MAX_SECONDS / 60} мин. Нажмите «Очистить», чтобы начать заново.`;
+    $("wv-status").textContent = `Дубль достиг предела ${MAX_SECONDS / 60} мин. Нажмите ●, чтобы записать следующий.`;
   }
+}
+
+/** The audio context and timeline, created on first use (input or a file import). */
+async function ensureCtx() {
+  if (ctx) return ctx;
+  // NAM models are trained at 48 kHz.
+  let c: AudioContext;
+  try {
+    c = new AudioContext({ latencyHint: "interactive", sampleRate: 48000 });
+  } catch {
+    c = new AudioContext({ latencyHint: "interactive" });
+  }
+  await c.audioWorklet.addModule(workletUrl);
+  ctx = c;
+  sr = c.sampleRate;
+  tl = new Timeline(sr);
+  return c;
 }
 
 async function openInput() {
@@ -142,21 +186,10 @@ async function openInput() {
         channelCount: { ideal: 2 },
       },
     });
-    if (!ctx) {
-      // NAM models are trained at 48 kHz.
-      try {
-        ctx = new AudioContext({ latencyHint: "interactive", sampleRate: 48000 });
-      } catch {
-        ctx = new AudioContext({ latencyHint: "interactive" });
-      }
-      await ctx.audioWorklet.addModule(workletUrl);
-      sr = ctx.sampleRate;
-      store = new SampleStore(MAX_SECONDS * sr);
-      pm = new PmAnalyzer(sr);
-    }
-    await ctx.resume();
-    source = ctx.createMediaStreamSource(stream);
-    node = new AudioWorkletNode(ctx, "wave-capture", {
+    const c = await ensureCtx();
+    await c.resume();
+    source = c.createMediaStreamSource(stream);
+    node = new AudioWorkletNode(c, "wave-capture", {
       numberOfInputs: 1,
       numberOfOutputs: 1,
       outputChannelCount: [1],
@@ -167,9 +200,9 @@ async function openInput() {
     node.port.onmessage = (e: MessageEvent<Float32Array | ChannelReport>) =>
       e.data instanceof Float32Array ? onBlock(e.data) : onChannels(e.data);
     node.port.postMessage({ mode: settings.channel });
-    const mute = ctx.createGain();
+    const mute = c.createGain();
     mute.gain.value = 0;
-    source.connect(node).connect(mute).connect(ctx.destination);
+    source.connect(node).connect(mute).connect(c.destination);
     // The monitor hears the same chosen channel as the recording.
     if (monitor) node.connect(monitor.input);
     else if (settings.monOn) void startMonitor();
@@ -273,13 +306,30 @@ const ICON = {
 };
 
 function setRecording(on: boolean) {
-  if (on && (!store || !ctx || store.full)) return;
-  if (on) stopPlay();
+  if (on === recording) return;
+  if (on) {
+    if (!ctx || !tl || !node) return;
+    stopPlay();
+    // A new take starts at the marker (or the end); over existing audio it goes on a free lane.
+    const pos = marker !== null ? Math.min(Math.round(marker * sr), tl.length) : tl.length;
+    const lane = tl.freeLane(pos, MAX_SECONDS * sr);
+    const take = tl.newTake(`Дубль ${tl.takeCount + 1}`, new SampleStore(MAX_SECONDS * sr));
+    tl.checkpoint();
+    rec = { take, clip: tl.addClip(take, 0, 0, pos, lane) };
+    selClip = rec.clip;
+    selection = null;
+    follow = true;
+  } else if (rec && tl) {
+    // An empty take leaves no clip behind.
+    if (rec.clip.to === 0) tl.clips = tl.clips.filter((c) => c !== rec!.clip);
+    marker = clipEnd(rec.clip) / sr;
+    rec = null;
+  }
   recording = on;
   $("wv-rec").classList.toggle("on", on);
   $("wv-rec").setAttribute("aria-pressed", String(on));
-  if (on) follow = true;
   clampView();
+  renderEditState();
 }
 
 function stopAll() {
@@ -335,12 +385,14 @@ function setMarker(t: number) {
 
 function togglePlay() {
   if (play) return stopPlay(true);
-  if (!ctx || !store || !store.length) return;
+  if (!ctx || !tl || !tl.length) return;
   if (recording) setRecording(false);
-  let from = pausedAt ?? marker ?? viewStart;
+  let from = pausedAt ?? marker ?? selection?.a ?? viewStart;
   if (from >= total() - 0.01) from = marker ?? 0;
+  // Inside a selection, play to its end.
+  const end = selection && from >= selection.a && from < selection.b ? selection.b : total();
   pausedAt = null;
-  const data = store.slice(from * sr, store.length);
+  const data = tl.render(from * sr, end * sr);
   if (!data.length) return;
   const buf = ctx.createBuffer(1, data.length, sr);
   buf.copyToChannel(data, 0);
@@ -357,14 +409,118 @@ function togglePlay() {
 }
 
 function clearAll() {
-  pm?.reset();
+  if (recording) setRecording(false);
   stopPlay();
-  store?.clear();
+  tl?.clear();
+  selClip = null;
+  selection = null;
   follow = true;
   viewSpan = 3;
-  hoverX = null;
+  hover = null;
   marker = pausedAt = null;
+  pmKey = "";
   clampView();
+  renderEditState();
+}
+
+// ---------- editing ----------
+
+/** Grid step in seconds, or null when snapping is off. */
+function gridStep() {
+  if (settings.grid === "off") return null;
+  const beat = 60 / settings.bpm;
+  return settings.grid === "1" ? beat * 4 : (beat * 4) / Number(settings.grid);
+}
+
+function splitAtMarker() {
+  if (!tl || marker === null || recording) return;
+  const s = Math.round(marker * sr);
+  const own = selClip && s > selClip.pos && s < clipEnd(selClip) ? selClip : null;
+  const made = tl.split(s, own);
+  if (made.length) {
+    selClip = made[0];
+    status(`Разрезано: ${made.length === 1 ? "1 кусочек" : `${made.length} кусочка`} по маркеру.`);
+  } else status("Под маркером нет кусочка, который можно разрезать.");
+  renderEditState();
+}
+
+function deleteClip() {
+  if (!tl || !selClip || recording) return;
+  tl.remove(selClip);
+  selClip = null;
+  renderEditState();
+}
+
+function undo() {
+  if (!tl || recording) return;
+  if (tl.undo()) {
+    selClip = null;
+    status("Отменено.");
+  }
+  renderEditState();
+}
+
+const status = (t: string) => ($("wv-edit-status").textContent = t);
+
+function renderEditState() {
+  const has = !!tl && tl.clips.length > 0;
+  $<HTMLButtonElement>("ed-split").disabled = !has || recording;
+  $<HTMLButtonElement>("ed-del").disabled = !selClip || recording;
+  $<HTMLButtonElement>("ed-undo").disabled = !tl?.canUndo || recording;
+  $<HTMLButtonElement>("ed-save-all").disabled = !has || recording;
+  $<HTMLButtonElement>("ed-save-sel").disabled = !has || !selection || recording;
+  $("ed-sel").textContent = selection
+    ? `Выделено ${fmtClock(selection.a)}–${fmtClock(selection.b)} (${fmtSpan(selection.b - selection.a)})`
+    : "";
+}
+
+function fileStamp() {
+  const d = new Date();
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}_${p(d.getHours())}-${p(d.getMinutes())}`;
+}
+
+function saveWav(part: boolean) {
+  if (!tl || !tl.length) return;
+  const a = part && selection ? selection.a : 0;
+  const b = part && selection ? selection.b : total();
+  const blob = encodeWav(tl.render(a * sr, b * sr), sr);
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `guitar_${fileStamp()}${part ? "_fragment" : ""}.wav`;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10_000);
+  status(`Сохранено: ${link.download} (${fmtSpan(b - a)}, WAV 24 бит, ${sr / 1000} кГц).`);
+}
+
+async function importFile(f: File) {
+  try {
+    const c = await ensureCtx();
+    status(`Читаю «${f.name}»…`);
+    const audio = await c.decodeAudioData(await f.arrayBuffer());
+    const len = Math.min(audio.length, MAX_SECONDS * sr);
+    const mono = new Float32Array(len);
+    for (let ch = 0; ch < audio.numberOfChannels; ch++) {
+      const d = audio.getChannelData(ch);
+      for (let i = 0; i < len; i++) mono[i] += d[i] / audio.numberOfChannels;
+    }
+    const store = new SampleStore(len);
+    store.push(mono);
+    const t = tl!;
+    const take = t.newTake(f.name.replace(/\.[^.]+$/, ""), store);
+    const pos = marker !== null ? Math.min(Math.round(marker * sr), t.length) : t.length;
+    t.checkpoint();
+    selClip = t.addClip(take, 0, len, pos, t.freeLane(pos, len));
+    follow = false;
+    status(`Добавлен «${take.name}» (${fmtSpan(len / sr)}).`);
+    renderEditState();
+  } catch (e) {
+    console.error(e);
+    status(`Не удалось открыть «${f.name}»: это не аудиофайл или формат не поддерживается.`);
+  }
 }
 
 // ---------- drawing ----------
@@ -398,6 +554,11 @@ function fmtTime(t: number, step: number) {
   return `${m}:${s}`;
 }
 
+const fmtClock = (t: number) => {
+  const m = Math.floor(t / 60);
+  return `${m}:${(t - m * 60).toFixed(3).padStart(6, "0")}`;
+};
+
 function fmtSpan(s: number) {
   if (s < 0.001) return `${(s * 1e6).toFixed(0)} мкс`;
   if (s < 1) return `${(s * 1000).toFixed(s < 0.01 ? 2 : s < 0.1 ? 1 : 0)} мс`;
@@ -406,88 +567,85 @@ function fmtSpan(s: number) {
 
 const fmtDb = (v: number) => (v > 1e-6 ? `${(20 * Math.log10(v)).toFixed(1)} дБ` : "−∞ дБ");
 
+const RULER = 22;
+/** Lanes shown: the used ones, plus an empty one while a clip is being dragged. */
+const laneCount = () => (tl ? tl.lanes + (drag?.mode === "clip" ? 1 : 0) : 1);
+
 function drawWave() {
   const { g, W, H, dpr } = fit(wave);
   g.fillStyle = col.stage;
   g.fillRect(0, 0, W, H);
-  const top = 22 * dpr;
-  const mid = top + (H - top) / 2;
-  const amp = ((H - top) / 2 - 4 * dpr) * gain;
-  const yOf = (v: number) => Math.min(H, Math.max(top, mid - v * amp));
+  const top = RULER * dpr;
+  const lanes = laneCount();
+  const laneH = (H - top) / lanes;
+  const xOf = (t: number) => ((t - viewStart) / viewSpan) * W;
 
-  // amplitude grid
-  g.fillStyle = col.grid;
-  for (const a of [-1, -0.5, 0.5, 1]) {
-    const y = mid - a * amp;
-    if (y > top && y < H) g.fillRect(0, Math.round(y), W, dpr);
+  // musical grid
+  const gs = gridStep();
+  if (gs && (gs / viewSpan) * W >= 6 * dpr) {
+    const beat = 60 / settings.bpm;
+    for (let k = Math.ceil(viewStart / gs); k * gs <= viewStart + viewSpan; k++) {
+      const t = k * gs;
+      const bar = Math.abs(t / (beat * 4) - Math.round(t / (beat * 4))) < 1e-6;
+      g.fillStyle = bar ? col.axis : col.grid;
+      g.fillRect(Math.round(xOf(t)), top, dpr, H - top);
+    }
   }
-  g.fillStyle = col.axis;
-  g.fillRect(0, Math.round(mid), W, dpr);
-
-  // time grid
+  // time ruler
   const step = niceStep((viewSpan * 110 * dpr) / W);
   g.font = `${11 * dpr}px "IBM Plex Mono", ui-monospace, monospace`;
   g.textBaseline = "middle";
   for (let t = Math.ceil(viewStart / step) * step; t <= viewStart + viewSpan; t += step) {
-    const x = Math.round(((t - viewStart) / viewSpan) * W);
+    const x = Math.round(xOf(t));
     g.fillStyle = col.grid;
-    g.fillRect(x, top, dpr, H - top);
+    g.fillRect(x, 0, dpr, top);
+    if (!gs) g.fillRect(x, top, dpr, H - top);
     g.fillStyle = col.text;
     g.fillText(fmtTime(t, step), x + 4 * dpr, top / 2);
   }
+  // lane separators
+  g.fillStyle = col.grid;
+  for (let l = 1; l < lanes; l++) g.fillRect(0, Math.round(top + l * laneH), W, dpr);
 
-  const n = store?.length ?? 0;
-  if (store && n) {
-    const spp = (viewSpan * sr) / W;
-    const s0 = viewStart * sr;
-    if (spp >= 2) {
-      for (let px = 0; px < W; px++) {
-        const a = Math.floor(s0 + px * spp);
-        if (a >= n) break;
-        // +1 overlaps the next column so steep edges stay connected.
-        const b = Math.max(a + 1, Math.floor(s0 + (px + 1) * spp)) + 1;
-        if (b <= 0) continue;
-        const [mn, mx] = store.range(a, b);
-        if (mn > mx) continue;
-        g.fillStyle = mx >= 0.995 || mn <= -0.995 ? col.clip : col.wave;
-        const y1 = yOf(mx), y2 = yOf(mn);
-        g.fillRect(px, y1, 1, Math.max(dpr, y2 - y1));
-      }
-    } else {
-      const i0 = Math.max(0, Math.floor(s0) - 1);
-      const i1 = Math.min(n - 1, Math.ceil(s0 + W * spp) + 1);
-      g.strokeStyle = col.wave;
-      g.lineWidth = 1.5 * dpr;
-      g.beginPath();
-      for (let i = i0; i <= i1; i++) {
-        const x = (i - s0) / spp, y = yOf(store.at(i));
-        if (i === i0) g.moveTo(x, y);
-        else g.lineTo(x, y);
-      }
-      g.stroke();
-      if (1 / spp > 7 * dpr) {
-        g.fillStyle = col.wave;
-        for (let i = i0; i <= i1; i++) {
-          g.beginPath();
-          g.arc((i - s0) / spp, yOf(store.at(i)), 2.5 * dpr, 0, Math.PI * 2);
-          g.fill();
-        }
+  if (selection) {
+    const x0 = xOf(selection.a), x1 = xOf(selection.b);
+    g.fillStyle = col.play;
+    g.globalAlpha = 0.14;
+    g.fillRect(x0, top, x1 - x0, H - top);
+    g.globalAlpha = 0.6;
+    g.fillRect(Math.round(x0), top, dpr, H - top);
+    g.fillRect(Math.round(x1), top, dpr, H - top);
+    g.globalAlpha = 1;
+  }
+
+  if (tl && tl.clips.length) {
+    const checks = new Map<Take, Map<PmNote, PitchCheck>>();
+    for (const c of tl.clips) {
+      const x0 = xOf(c.pos / sr), x1 = xOf(clipEnd(c) / sr);
+      if (x1 < 0 || x0 > W) continue;
+      drawClip(g, c, x0, x1, top + c.lane * laneH, laneH, W, dpr);
+      if (settings.exercise === "pm") {
+        let ch = checks.get(c.take);
+        if (!ch) checks.set(c.take, (ch = checkPitches(c.take.pm.notes, pmLimit())));
+        drawPmMarks(g, W, top + c.lane * laneH, laneH, dpr, xOf, c, ch);
       }
     }
   } else {
     g.fillStyle = col.text;
     g.textAlign = "center";
-    g.fillText(ctx ? "Нажмите ● или клавишу R, чтобы записать." : "Включите аудиовход, чтобы увидеть волну.", W / 2, mid - 20 * dpr);
+    g.fillText(
+      ctx ? "Нажмите ● или клавишу R, чтобы записать, или добавьте файл." : "Включите аудиовход, чтобы увидеть волну.",
+      W / 2,
+      top + (H - top) / 2 - 20 * dpr,
+    );
     g.textAlign = "start";
   }
 
-  const xOf = (t: number) => ((t - viewStart) / viewSpan) * W;
-  if (settings.exercise === "pm" && pm) drawPmMarks(g, W, H, top, dpr, xOf);
   if (marker !== null) {
     const x = Math.round(xOf(marker));
     if (x >= 0 && x <= W) {
       g.fillStyle = col.axis;
-      g.fillRect(x, top, dpr, H - top);
+      g.fillRect(x, 0, dpr, H);
     }
   }
   const pos = playPos() ?? pausedAt;
@@ -496,8 +654,78 @@ function drawWave() {
     if (x >= 0 && x <= W) {
       g.fillStyle = col.play;
       g.globalAlpha = play ? 1 : 0.55;
-      g.fillRect(Math.round(x), top, 2 * dpr, H - top);
+      g.fillRect(Math.round(x), 0, 2 * dpr, H);
       g.globalAlpha = 1;
+    }
+  }
+}
+
+function drawClip(g: CanvasRenderingContext2D, c: Clip, x0: number, x1: number, y0: number, h: number, W: number, dpr: number) {
+  const st = c.take.store;
+  const pad = 2 * dpr;
+  const head = h > 46 * dpr ? 14 * dpr : 0;
+  g.fillStyle = col.box;
+  g.fillRect(x0, y0 + pad, x1 - x0, h - 2 * pad);
+  if (c === selClip) {
+    g.strokeStyle = col.play;
+    g.lineWidth = 1.5 * dpr;
+    g.strokeRect(x0 + dpr, y0 + pad + dpr, x1 - x0 - 2 * dpr, h - 2 * pad - 2 * dpr);
+  }
+  if (head) {
+    g.save();
+    g.beginPath();
+    g.rect(Math.max(0, x0), y0, Math.min(W, x1) - Math.max(0, x0), h);
+    g.clip();
+    g.fillStyle = c === selClip ? col.play : col.text;
+    g.font = `${10 * dpr}px "IBM Plex Mono", ui-monospace, monospace`;
+    g.textBaseline = "top";
+    g.fillText(c.take.name, Math.max(x0, 0) + 5 * dpr, y0 + pad + 2 * dpr);
+    g.textBaseline = "middle";
+    g.restore();
+  }
+  const mid = y0 + head / 2 + h / 2;
+  const amp = ((h - head) / 2 - 4 * dpr) * gain;
+  const yTop = y0 + pad + head, yBot = y0 + h - pad;
+  const yOf = (v: number) => Math.min(yBot, Math.max(yTop, mid - v * amp));
+  g.fillStyle = col.grid;
+  g.fillRect(Math.max(0, x0), Math.round(mid), Math.min(W, x1) - Math.max(0, x0), dpr);
+
+  const spp = (viewSpan * sr) / W;
+  const s0 = viewStart * sr;
+  const off = c.from - c.pos; // timeline sample → take sample
+  if (spp >= 2) {
+    const pxA = Math.max(0, Math.floor(x0)), pxB = Math.min(W, Math.ceil(x1));
+    for (let px = pxA; px < pxB; px++) {
+      const a = Math.max(c.pos, Math.floor(s0 + px * spp));
+      // +1 overlaps the next column so steep edges stay connected.
+      const b = Math.min(clipEnd(c), Math.max(a + 1, Math.floor(s0 + (px + 1) * spp)) + 1);
+      if (b <= a) continue;
+      const [mn, mx] = st.range(a + off, b + off);
+      if (mn > mx) continue;
+      g.fillStyle = mx >= 0.995 || mn <= -0.995 ? col.clip : col.wave;
+      const y1 = yOf(mx), y2 = yOf(mn);
+      g.fillRect(px, y1, 1, Math.max(dpr, y2 - y1));
+    }
+  } else {
+    const i0 = Math.max(c.pos, Math.floor(s0) - 1);
+    const i1 = Math.min(clipEnd(c) - 1, Math.ceil(s0 + W * spp) + 1);
+    if (i1 < i0) return;
+    g.strokeStyle = col.wave;
+    g.lineWidth = 1.5 * dpr;
+    g.beginPath();
+    for (let i = i0; i <= i1; i++) {
+      const x = (i - s0) / spp, y = yOf(st.at(i + off));
+      if (i === i0) g.moveTo(x, y);
+      else g.lineTo(x, y);
+    }
+    g.stroke();
+    if (1 / spp > 7 * dpr) {
+      g.fillStyle = col.wave;
+      for (let i = i0; i <= i1; i++) {
+        g.beginPath();
+        g.arc((i - s0) / spp, yOf(st.at(i + off)), 2.5 * dpr, 0, Math.PI * 2);
+        g.fill();
+      }
     }
   }
 }
@@ -506,16 +734,15 @@ function drawOverview() {
   const { g, W, H, dpr } = fit(over);
   g.fillStyle = col.stage;
   g.fillRect(0, 0, W, H);
-  const n = store?.length ?? 0;
-  if (!store || !n) return;
+  const n = tl?.length ?? 0;
+  if (!tl || !n) return;
   const mid = H / 2, amp = H / 2 - 3 * dpr;
   const spp = n / W;
   g.fillStyle = col.wave;
   for (let px = 0; px < W; px++) {
     const a = Math.floor(px * spp);
     const b = Math.max(a + 1, Math.floor((px + 1) * spp));
-    if (a >= n) break;
-    const [mn, mx] = store.range(a, b);
+    const [mn, mx] = tl.range(a, b);
     if (mn > mx) continue;
     g.fillRect(px, mid - mx * amp, 1, Math.max(dpr, (mx - mn) * amp));
   }
@@ -531,14 +758,14 @@ function drawOverview() {
 }
 
 function renderStats() {
-  const n = store?.length ?? 0;
-  $("wv-dur").textContent = `${(n / sr).toFixed(1)} с`;
+  const len = total();
+  $("wv-dur").textContent = `${len.toFixed(1)} с`;
   $("wv-rate").textContent = ctx ? `${(sr / 1000).toFixed(1)}` : "—";
   $("wv-span").textContent = fmtSpan(viewSpan);
   const spp = (viewSpan * sr) / Math.max(1, wave.clientWidth);
   $("wv-spp").textContent = spp >= 1 ? `${spp.toFixed(spp < 10 ? 1 : 0)} сэмпл./пиксель` : `${(1 / spp).toFixed(1)} пикс./сэмпл`;
-  if (store && n) {
-    const [mn, mx] = store.range(Math.floor(viewStart * sr), Math.ceil((viewStart + viewSpan) * sr));
+  if (tl && tl.length) {
+    const [mn, mx] = tl.range(Math.floor(viewStart * sr), Math.ceil((viewStart + viewSpan) * sr));
     $("wv-peak").textContent = mn <= mx ? fmtDb(Math.max(-mn, mx)) : "—";
   } else $("wv-peak").textContent = "—";
   $("wv-gain").textContent = `×${gain < 10 ? gain.toFixed(1) : gain.toFixed(0)}`;
@@ -548,37 +775,37 @@ function renderStats() {
   lvl.classList.toggle("hot", levelDb > -1);
 
   const cur = $("wv-cursor");
-  if (hoverX !== null && store && n) {
-    const t = viewStart + (hoverX / wave.clientWidth) * viewSpan;
+  if (hover && tl && tl.length) {
+    const { t, lane } = locate(hover.x, hover.y);
     const i = Math.round(t * sr);
-    if (i >= 0 && i < n) {
-      const v = store.at(i);
-      const m = Math.floor(t / 60);
-      cur.textContent = `${m}:${(t - m * 60).toFixed(4).padStart(7, "0")} · сэмпл ${i} · ${v >= 0 ? "+" : ""}${v.toFixed(4)} (${fmtDb(Math.abs(v))})`;
+    if (i >= 0 && i < tl.length) {
+      const c = tl.clipAt(i, lane);
+      const v = tl.sampleAt(i);
+      cur.textContent = `${fmtClock(t)} · сэмпл ${i} · ${v >= 0 ? "+" : ""}${v.toFixed(4)} (${fmtDb(Math.abs(v))})${c ? ` · ${c.take.name}` : ""}`;
       return;
     }
   }
   const at = playPos() ?? pausedAt ?? marker;
   if (at !== null) {
-    const m = Math.floor(at / 60);
     const what = play ? "Играет" : pausedAt !== null ? "Пауза на" : "Маркер";
-    cur.textContent = `${what} ${m}:${(at - m * 60).toFixed(3).padStart(6, "0")}`;
-  } else cur.textContent = recording ? "Идёт запись · пробел — стоп" : "Клик по волне ставит маркер";
+    cur.textContent = `${what} ${fmtClock(at)}`;
+  } else cur.textContent = recording ? "Идёт запись · пробел — стоп" : "Клик — маркер, протяжка — выделение";
 }
 
 function renderTime() {
-  const t = recording ? total() : (playPos() ?? pausedAt ?? marker ?? 0);
-  const m = Math.floor(t / 60);
-  $("wv-time").textContent = `${m}:${(t - m * 60).toFixed(3).padStart(6, "0")}`;
+  const t = recording ? head() : (playPos() ?? pausedAt ?? marker ?? 0);
+  $("wv-time").textContent = fmtClock(t);
   $("wv-time").classList.toggle("rec", recording);
 }
 
 function loop() {
   if (!visible) return;
   renderTime();
-  if (settings.exercise === "pm" && pm && store) {
-    pm.update(store);
-    if (pm.version !== pmRendered) renderPm();
+  if (settings.exercise === "pm" && tl) {
+    for (const t of tl.takes) t.pm.update(t.store);
+    const ft = focusTake();
+    const key = ft ? `${ft.id}:${ft.pm.version}` : "";
+    if (key !== pmKey) renderPm();
   }
   const pos = playPos();
   if (pos !== null && !drag && (pos > viewStart + viewSpan || pos < viewStart)) {
@@ -590,12 +817,20 @@ function loop() {
   drawOverview();
   renderStats();
   const live = $("wv-live");
-  live.hidden = follow || !store?.length;
+  live.hidden = follow || !tl?.length;
   live.textContent = recording ? "К реальному времени →" : "К концу записи →";
   requestAnimationFrame(loop);
 }
 
 // ---------- interaction ----------
+
+/** Timeline time and lane under a point in canvas CSS pixels. */
+function locate(x: number, y: number) {
+  const t = viewStart + (x / wave.clientWidth) * viewSpan;
+  const laneH = (wave.clientHeight - RULER) / laneCount();
+  const lane = Math.max(0, Math.floor((y - RULER) / laneH));
+  return { t, lane };
+}
 
 wave.addEventListener(
   "wheel",
@@ -631,39 +866,109 @@ function panBy(dt: number) {
   follow = false;
   viewStart += dt;
   clampView();
-  if (recording && viewStart + viewSpan >= total() - 1e-4 && dt > 0) follow = true;
+  if (recording && viewStart + viewSpan >= head() - 1e-4 && dt > 0) follow = true;
 }
 
-let drag: { x: number; start: number; moved: boolean } | null = null;
+type Drag =
+  | { mode: "pan"; x: number; start: number; moved: boolean }
+  | { mode: "select"; x: number; anchor: number; moved: boolean }
+  | { mode: "clip"; x: number; y: number; clip: Clip; grab: number; copy: boolean; moved: boolean };
+let drag: Drag | null = null;
+
 wave.addEventListener("pointerdown", (e) => {
-  if (e.button !== 0) return;
+  const rect = wave.getBoundingClientRect();
+  const px = e.clientX - rect.left, py = e.clientY - rect.top;
   wave.setPointerCapture(e.pointerId);
-  drag = { x: e.clientX, start: viewStart, moved: false };
-  wave.classList.add("dragging");
+  if (e.button === 1) {
+    e.preventDefault();
+    drag = { mode: "pan", x: e.clientX, start: viewStart, moved: false };
+    wave.classList.add("dragging");
+    return;
+  }
+  if (e.button !== 0) return;
+  const { t, lane } = locate(px, py);
+  const hit = !e.shiftKey && tl && !recording ? tl.clipAt(Math.round(t * sr), lane) : null;
+  if (hit) {
+    drag = { mode: "clip", x: e.clientX, y: e.clientY, clip: hit, grab: t * sr - hit.pos, copy: e.altKey, moved: false };
+    selClip = hit;
+    renderEditState();
+  } else drag = { mode: "select", x: e.clientX, anchor: t, moved: false };
 });
+
 wave.addEventListener("pointermove", (e) => {
   const rect = wave.getBoundingClientRect();
-  hoverX = e.clientX - rect.left;
+  const px = e.clientX - rect.left, py = e.clientY - rect.top;
+  hover = { x: px, y: py };
   if (!drag) return;
-  if (Math.abs(e.clientX - drag.x) > 3) drag.moved = true;
-  if (!drag.moved) return;
-  const dt = ((drag.x - e.clientX) / rect.width) * viewSpan;
-  follow = false;
-  viewStart = drag.start + dt;
-  clampView();
-});
-const endDrag = (e: PointerEvent) => {
-  if (drag && !drag.moved && e.type === "pointerup" && store?.length) {
-    const rect = wave.getBoundingClientRect();
-    setMarker(viewStart + ((e.clientX - rect.left) / rect.width) * viewSpan);
+  if (!drag.moved && Math.abs(e.clientX - drag.x) + (drag.mode === "clip" ? Math.abs(e.clientY - drag.y) : 0) <= 3) return;
+  const first = !drag.moved;
+  drag.moved = true;
+  const { t, lane } = locate(px, py);
+  if (drag.mode === "pan") {
+    follow = false;
+    viewStart = drag.start + ((drag.x - e.clientX) / rect.width) * viewSpan;
+    clampView();
+  } else if (drag.mode === "select") {
+    const a = Math.max(0, Math.min(drag.anchor, t)), b = Math.min(total(), Math.max(drag.anchor, t));
+    selection = b > a ? { a, b } : null;
+    renderEditState();
+  } else if (tl) {
+    if (first) {
+      tl.checkpoint();
+      if (drag.copy) {
+        // Alt-drag leaves the original in place and moves a copy.
+        const c = drag.clip;
+        drag.clip = tl.addClip(c.take, c.from, c.to, c.pos, c.lane);
+        selClip = drag.clip;
+      }
+      wave.classList.add("dragging");
+    }
+    let pos = t * sr - drag.grab;
+    const gs = gridStep();
+    if (gs && !e.shiftKey) pos = Math.round(pos / (gs * sr)) * gs * sr;
+    drag.clip.pos = Math.max(0, Math.round(pos));
+    drag.clip.lane = Math.min(lane, tl.lanes);
+    follow = false;
   }
+});
+
+const endDrag = (e: PointerEvent) => {
+  const d = drag;
   drag = null;
   wave.classList.remove("dragging");
+  if (!d || e.type !== "pointerup") return;
+  const rect = wave.getBoundingClientRect();
+  const { t } = locate(e.clientX - rect.left, e.clientY - rect.top);
+  if (d.mode === "select") {
+    if (!d.moved) {
+      selection = null;
+      selClip = null;
+      if (tl?.length) setMarker(t);
+    } else if (selection) {
+      marker = selection.a;
+      pausedAt = null;
+    }
+  } else if (d.mode === "clip") {
+    if (!d.moved) {
+      selection = null;
+      setMarker(t);
+    } else if (tl) compactLanes();
+  }
+  renderEditState();
 };
 wave.addEventListener("pointerup", endDrag);
 wave.addEventListener("pointercancel", endDrag);
-wave.addEventListener("pointerleave", () => (hoverX = null));
+wave.addEventListener("pointerleave", () => (hover = null));
 wave.addEventListener("dblclick", () => showAll());
+wave.addEventListener("auxclick", (e) => e.preventDefault());
+
+/** Removes empty lanes between used ones. */
+function compactLanes() {
+  if (!tl) return;
+  const used = [...new Set(tl.clips.map((c) => c.lane))].sort((a, b) => a - b);
+  const map = new Map(used.map((l, i) => [l, i]));
+  for (const c of tl.clips) c.lane = map.get(c.lane)!;
+}
 
 function showAll() {
   viewSpan = Math.max(total(), 0.01);
@@ -678,7 +983,7 @@ function seekOverview(e: PointerEvent) {
   follow = false;
   viewStart = t - viewSpan / 2;
   clampView();
-  if (recording && viewStart + viewSpan >= total() - 1e-4) follow = true;
+  if (recording && viewStart + viewSpan >= head() - 1e-4) follow = true;
 }
 over.addEventListener("pointerdown", (e) => {
   over.setPointerCapture(e.pointerId);
@@ -695,24 +1000,80 @@ $("wv-home").addEventListener("click", toStart);
 $("wv-end").addEventListener("click", toEnd);
 $("wv-clear").addEventListener("click", clearAll);
 $("wv-play").addEventListener("click", togglePlay);
+$("ed-split").addEventListener("click", splitAtMarker);
+$("ed-del").addEventListener("click", deleteClip);
+$("ed-undo").addEventListener("click", undo);
+$("ed-save-all").addEventListener("click", () => saveWav(false));
+$("ed-save-sel").addEventListener("click", () => saveWav(true));
+const edFile = $<HTMLInputElement>("ed-file");
+$("ed-add").addEventListener("click", () => edFile.click());
+edFile.addEventListener("change", async () => {
+  for (const f of [...(edFile.files ?? [])]) await importFile(f);
+  edFile.value = "";
+});
+
+const gridSel = $<HTMLSelectElement>("ed-grid");
+const bpmIn = $<HTMLInputElement>("ed-bpm");
+gridSel.value = settings.grid;
+bpmIn.value = String(settings.bpm);
+gridSel.addEventListener("change", () => {
+  settings.grid = gridSel.value as GridDiv;
+  saveSettings();
+});
+bpmIn.addEventListener("change", () => {
+  const v = Number(bpmIn.value);
+  if (v >= 30 && v <= 300) settings.bpm = v;
+  bpmIn.value = String(settings.bpm);
+  saveSettings();
+});
 
 const KEYS: Record<string, () => void> = {
   Space: spaceAction,
   Home: toStart,
   End: toEnd,
   KeyR: () => setRecording(!recording),
+  KeyS: splitAtMarker,
+  Delete: deleteClip,
+  Backspace: deleteClip,
+  Escape: () => {
+    selection = null;
+    selClip = null;
+    renderEditState();
+  },
 };
 window.addEventListener("keydown", (e) => {
-  const act = KEYS[e.code];
-  if (!visible || !act || e.repeat || e.metaKey || e.ctrlKey || e.altKey) return;
+  if (!visible) return;
   const t = e.target as HTMLElement;
   if (t.closest("input, select, textarea, [contenteditable]")) return;
+  if ((e.metaKey || e.ctrlKey) && e.code === "KeyZ" && !e.shiftKey) {
+    e.preventDefault();
+    undo();
+    return;
+  }
+  const act = KEYS[e.code];
+  if (!act || e.repeat || e.metaKey || e.ctrlKey || e.altKey) return;
   e.preventDefault();
   // Space on a focused button would also click it.
   if (t instanceof HTMLButtonElement) t.blur();
   act();
 });
 $("wv-all").addEventListener("click", showAll);
+$("vw-all").addEventListener("click", showAll);
+$("vw-live").addEventListener("click", () => {
+  follow = true;
+  clampView();
+});
+const zoomBy = (k: number) => {
+  const mid = viewStart + viewSpan / 2;
+  follow = false;
+  viewSpan *= k;
+  viewStart = mid - viewSpan / 2;
+  clampView();
+};
+$("vw-zin").addEventListener("click", () => zoomBy(0.5));
+$("vw-zout").addEventListener("click", () => zoomBy(2));
+$("vw-gain").addEventListener("click", () => (gain = 1));
+$("ed-desel").addEventListener("click", KEYS.Escape);
 $("wv-live").addEventListener("click", () => {
   follow = true;
   clampView();
@@ -729,6 +1090,7 @@ $("wv-device").addEventListener("change", (e) => {
   saveSettings();
   if (ctx) void openInput();
 });
+renderEditState();
 
 // ---------- monitoring (amp + distortion) ----------
 
@@ -880,8 +1242,9 @@ renderMonitorControls();
 
 // ---------- palm mute exercise ----------
 
-let pm: PmAnalyzer | null = null;
-let pmRendered = -1;
+let pmKey = "";
+/** The take the exercise panel reports on: the one being recorded, the selected one, or the latest. */
+const focusTake = (): Take | null => rec?.take ?? selClip?.take ?? tl?.takes.at(-1) ?? null;
 const pmLimit = () => settings.pmLimMs / 1000;
 const attLimit = () => settings.attLimMs / 1000;
 /** A palm-muted note may sit this far from the open string and still count as the same note. */
@@ -944,13 +1307,27 @@ const STATE_HINT: Partial<Record<PmState, string>> = {
 };
 const stateClass = (s: PmState) => (s === "pm" ? "pm" : s === "open" ? "open" : s === "wait" ? "" : "warn");
 
-function drawPmMarks(g: CanvasRenderingContext2D, W: number, H: number, top: number, dpr: number, xOf: (t: number) => number) {
-  if (!pm) return;
-  const checks = checkPitches(pm.notes, pmLimit());
+function drawPmMarks(
+  g: CanvasRenderingContext2D,
+  W: number,
+  y0: number,
+  h: number,
+  dpr: number,
+  xOf: (t: number) => number,
+  clip: Clip,
+  checks: Map<PmNote, PitchCheck>,
+) {
+  const top = y0 + (h > 46 * dpr ? 16 * dpr : 2 * dpr);
+  const bottom = y0 + h - 2 * dpr;
   g.font = `600 ${11 * dpr}px "IBM Plex Mono", ui-monospace, monospace`;
   g.textBaseline = "top";
-  for (const n of pm.notes) {
-    const t = n.start / sr;
+  g.save();
+  g.beginPath();
+  g.rect(Math.max(0, xOf(clip.pos / sr)), y0, Math.min(W, xOf(clipEnd(clip) / sr)) - Math.max(0, xOf(clip.pos / sr)), h);
+  g.clip();
+  for (const n of clip.take.pm.notes) {
+    if (n.start < clip.from || n.start >= clip.to) continue;
+    const t = (clip.pos + n.start - clip.from) / sr;
     if (t > viewStart + viewSpan) break;
     const x = xOf(t);
     const v = judgePm(n, checks);
@@ -959,10 +1336,10 @@ function drawPmMarks(g: CanvasRenderingContext2D, W: number, H: number, top: num
     const x20 = n.t20 === null ? null : xOf(t + n.t20);
     if (x20 !== null && x20 < 0) continue;
     g.fillStyle = c;
-    g.fillRect(Math.round(x), top, 2 * dpr, H - top);
+    g.fillRect(Math.round(x), top, 2 * dpr, bottom - top);
     if (x20 !== null) {
       // Bracket from the attack to the −20 dB point.
-      const y = top + 22 * dpr;
+      const y = top + 20 * dpr;
       g.globalAlpha = 0.35;
       g.fillRect(x, y, Math.max(dpr, x20 - x), 3 * dpr);
       g.globalAlpha = 1;
@@ -975,18 +1352,19 @@ function drawPmMarks(g: CanvasRenderingContext2D, W: number, H: number, top: num
     const tw = g.measureText(label).width;
     if (x + 4 * dpr + tw > 0 && x < W) {
       g.fillStyle = col.stage;
-      g.fillRect(x + 3 * dpr, top + 4 * dpr, tw + 6 * dpr, 15 * dpr);
+      g.fillRect(x + 3 * dpr, top + 2 * dpr, tw + 6 * dpr, 15 * dpr);
       g.fillStyle = c;
-      g.fillText(label, x + 6 * dpr, top + 6 * dpr);
+      g.fillText(label, x + 6 * dpr, top + 4 * dpr);
     }
   }
+  g.restore();
   g.textBaseline = "middle";
 }
 
 function renderPm() {
-  if (!pm) return;
-  pmRendered = pm.version;
-  const notes = pm.notes;
+  const take = focusTake();
+  pmKey = take ? `${take.id}:${take.pm.version}` : "";
+  const notes = take?.pm.notes ?? [];
   const checks = checkPitches(notes, pmLimit());
   const last = notes.at(-1);
   const box = $("pm-verdict");
@@ -1037,7 +1415,9 @@ function renderPm() {
       .map(([n, j]) => {
         const b = document.createElement("button");
         b.className = `pm-note ${j.state === "pm" && !cleanAttack(j) ? "warn" : stateClass(j.state)}`;
-        const t = n.start / sr;
+        // Where this note sits on the timeline: the first clip of the take that contains it.
+        const clip = tl?.clips.find((c) => c.take === take && n.start >= c.from && n.start < c.to);
+        const t = clip ? (clip.pos + n.start - clip.from) / sr : n.start / sr;
         const m = Math.floor(t / 60);
         const pitch = j.pitch ? `${j.pitch.name.split(" ")[0]} ${fmtCents(j.pitch.cents)}` : "без высоты";
         b.innerHTML =
@@ -1045,6 +1425,7 @@ function renderPm() {
           `<span>${m}:${(t - m * 60).toFixed(2).padStart(5, "0")} · ${fmtT20(n)}</span>` +
           `<span>${pitch} · атака ${fmtAtt(n.attack)}${j.slowAttack ? " !" : ""}</span>` +
           (j.double ? `<span class="pm-bad">двойная атака, ${Math.round(n.doubleGap! * 1000)} мс</span>` : "");
+        b.disabled = !clip;
         b.addEventListener("click", () => {
           follow = false;
           viewSpan = Math.max(Math.min(viewSpan, 2), (n.t20 ?? 0.5) * 3);
@@ -1059,13 +1440,14 @@ function renderPm() {
 
 function applyExercise() {
   const isPm = settings.exercise === "pm";
-  $<HTMLSelectElement>("wv-ex").value = settings.exercise;
+  for (const el of document.querySelectorAll<HTMLElement>("[data-ex]"))
+    el.setAttribute("aria-checked", String(el.dataset.ex === settings.exercise));
   $("pm-card").hidden = !isPm;
   $<HTMLInputElement>("pm-lim").value = String(settings.pmLimMs);
   $("pm-lim-v").textContent = fmtSec(pmLimit());
   $<HTMLInputElement>("pm-att-lim").value = String(settings.attLimMs);
   $("pm-att-lim-v").textContent = `${settings.attLimMs} мс`;
-  pmRendered = -1;
+  pmKey = "";
   if (isPm) renderPm();
 }
 
@@ -1077,12 +1459,14 @@ function pmTone() {
   monitorChanged();
 }
 
-$<HTMLSelectElement>("wv-ex").addEventListener("change", (e) => {
-  settings.exercise = (e.target as HTMLSelectElement).value as Settings["exercise"];
-  if (settings.exercise === "pm") pmTone();
+function setExercise(ex: Settings["exercise"]) {
+  settings.exercise = ex;
+  if (ex === "pm") pmTone();
   saveSettings();
   applyExercise();
-});
+}
+for (const el of document.querySelectorAll<HTMLElement>("[data-ex]"))
+  el.addEventListener("click", () => setExercise(el.dataset.ex as Settings["exercise"]));
 $<HTMLInputElement>("pm-att-lim").addEventListener("input", (e) => {
   settings.attLimMs = Number((e.target as HTMLInputElement).value);
   saveSettings();

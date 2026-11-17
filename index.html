@@ -207,16 +207,65 @@
     </div>
 
     <div id="tab-wave" class="tab" hidden>
+      <nav class="menubar" role="menubar" aria-label="Меню редактора">
+        <div class="menu">
+          <button class="menu-top" role="menuitem" aria-haspopup="true" aria-expanded="false">Файл</button>
+          <div class="menu-pop" role="menu">
+            <button role="menuitem" id="ed-add">Добавить аудиофайл…</button>
+            <hr />
+            <button role="menuitem" id="ed-save-all">Сохранить всё в WAV</button>
+            <button role="menuitem" id="ed-save-sel">Сохранить выделение в WAV</button>
+            <hr />
+            <button role="menuitem" id="wv-clear">Очистить всё</button>
+          </div>
+        </div>
+        <div class="menu">
+          <button class="menu-top" role="menuitem" aria-haspopup="true" aria-expanded="false">Редактирование</button>
+          <div class="menu-pop" role="menu">
+            <button role="menuitem" id="ed-undo">Отменить<kbd>⌘Z</kbd></button>
+            <hr />
+            <button role="menuitem" id="ed-split">Разрезать по маркеру<kbd>S</kbd></button>
+            <button role="menuitem" id="ed-del">Удалить кусочек<kbd>Del</kbd></button>
+            <button role="menuitem" id="ed-desel">Снять выделение<kbd>Esc</kbd></button>
+            <hr />
+            <div class="menu-field">
+              <label>Сетка
+                <select id="ed-grid">
+                  <option value="off">выкл.</option>
+                  <option value="1">такт</option>
+                  <option value="4">1/4</option>
+                  <option value="8">1/8</option>
+                  <option value="16">1/16</option>
+                </select>
+              </label>
+              <label>Темп <input id="ed-bpm" type="number" min="30" max="300" step="1" class="num" /> уд/мин</label>
+            </div>
+            <p class="menu-note">Кусочки прилипают к сетке; с Shift — без прилипания. Alt + перетаскивание — копия.</p>
+          </div>
+        </div>
+        <div class="menu">
+          <button class="menu-top" role="menuitem" aria-haspopup="true" aria-expanded="false">Вид</button>
+          <div class="menu-pop" role="menu">
+            <button role="menuitem" id="vw-all">Показать всю запись<kbd>двойной клик</kbd></button>
+            <button role="menuitem" id="vw-live">К реальному времени</button>
+            <hr />
+            <button role="menuitem" id="vw-zin">Приблизить<kbd>⌘ колесо</kbd></button>
+            <button role="menuitem" id="vw-zout">Отдалить<kbd>⌘ колесо</kbd></button>
+            <button role="menuitem" id="vw-gain">Сбросить усиление по высоте<kbd>⌥ колесо</kbd></button>
+          </div>
+        </div>
+        <div class="menu">
+          <button class="menu-top" role="menuitem" aria-haspopup="true" aria-expanded="false">Упражнения</button>
+          <div class="menu-pop" role="menu">
+            <button role="menuitemradio" data-ex="free" aria-checked="true">Свободная запись</button>
+            <button role="menuitemradio" data-ex="pm" aria-checked="false">Palm mute</button>
+          </div>
+        </div>
+        <input id="ed-file" type="file" accept="audio/*,.wav,.mp3,.m4a,.ogg,.flac" multiple hidden />
+      </nav>
       <div class="toolbar">
-        <p class="lede">Волна сигнала с гитары в реальном времени. Запись — красной кнопкой или клавишей R (до 5 минут). Любой кусок можно растянуть до отдельных сэмплов.</p>
+        <p class="lede">Волна сигнала с гитары. Запись — ● или R (дубль до 5 минут), каждый дубль — отдельный кусочек: его можно двигать по сетке, переносить на другую дорожку и резать.</p>
         <div class="controls">
-          <label class="field">
-            <span>Упражнение</span>
-            <select id="wv-ex">
-              <option value="free">Свободная запись</option>
-              <option value="pm">Palm mute</option>
-            </select>
-          </label>
           <button id="wv-start" class="btn">Включить аудиовход</button>
           <label class="field">
             <span>Вход</span>
@@ -230,7 +279,6 @@
               <option value="1">Канал 2</option>
             </select>
           </label>
-          <button id="wv-clear" class="btn ghost">Очистить</button>
         </div>
       </div>
 
@@ -252,6 +300,7 @@
             <b id="wv-time" class="mono wv-time">0:00.000</b>
             <div class="level wv-level" title="Уровень входа"><i id="wv-level"></i></div>
           </div>
+          <div class="wv-editline"><span id="ed-sel" class="mono"></span><span id="wv-edit-status"></span></div>
           <div class="wv-plot">
             <canvas id="wv-canvas" class="wv-canvas"></canvas>
             <button id="wv-live" class="btn small wv-live" hidden>К реальному времени →</button>
@@ -269,7 +318,10 @@
             <span><kbd>⌥</kbd> + колесо — усиление по высоте</span>
             <span>Клик — маркер, <kbd>Пробел</kbd> — играть / пауза, во время записи — стоп</span>
             <span><kbd>R</kbd> — запись, <kbd>Home</kbd> / <kbd>End</kbd> — к началу / к концу</span>
-            <span>Перетаскивание — прокрутка, двойной клик — вся запись</span>
+            <span>Протяжка по пустому месту или <kbd>Shift</kbd> + протяжка — выделение</span>
+            <span>Перетаскивание кусочка — перемещение (по сетке, на другую дорожку), <kbd>⌥</kbd> — копия</span>
+            <span><kbd>S</kbd> — разрезать по маркеру, <kbd>Del</kbd> — удалить кусочек, <kbd>⌘Z</kbd> — отменить</span>
+            <span>Средняя кнопка мыши — прокрутка, двойной клик — вся запись</span>
           </p>
           <p id="wv-status" class="note" role="status">Вход выключен.</p>
         </section>

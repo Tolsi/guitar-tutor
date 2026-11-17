@@ -2,6 +2,7 @@ import "./style.css";
 import { setStrumVisible } from "./strum/strum";
 import { setLegatoVisible } from "./legato/legato";
 import { setWaveVisible } from "./wave/wave";
+import { initMenubars } from "./menu";
 
 const TABS = ["strum", "legato", "wave"] as const;
 type Tab = (typeof TABS)[number];
@@ -18,5 +19,6 @@ function show() {
   setWaveVisible(tab === "wave");
 }
 
+initMenubars();
 window.addEventListener("hashchange", show);
 show();
