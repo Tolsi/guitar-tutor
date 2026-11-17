@@ -208,14 +208,13 @@
 
     <div id="tab-wave" class="tab" hidden>
       <div class="toolbar">
-        <p class="lede">Волна сигнала с гитары в реальном времени. Запись идёт, пока включён вход (до 5 минут). Любой кусок можно растянуть до отдельных сэмплов.</p>
+        <p class="lede">Волна сигнала с гитары в реальном времени. Запись — красной кнопкой или клавишей R (до 5 минут). Любой кусок можно растянуть до отдельных сэмплов.</p>
         <div class="controls">
           <button id="wv-start" class="btn">Включить аудиовход</button>
           <label class="field">
             <span>Вход</span>
             <select id="wv-device" disabled><option>—</option></select>
           </label>
-          <button id="wv-rec" class="btn rec" disabled>Запись</button>
           <button id="wv-clear" class="btn ghost">Очистить</button>
         </div>
       </div>
@@ -229,7 +228,15 @@
             <div><span>Пик видимого</span><b id="wv-peak" class="mono">—</b></div>
             <div><span>Усиление</span><b id="wv-gain" class="mono">×1</b></div>
           </div>
-          <div class="level wv-level" title="Уровень входа"><i id="wv-level"></i></div>
+          <div class="wv-transport" role="toolbar" aria-label="Транспорт">
+            <button id="wv-home" class="tp" title="К началу (Home)" aria-label="К началу"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 2.5h2v11H3zM14 2.5v11L6 8z"/></svg></button>
+            <button id="wv-play" class="tp" title="Играть / пауза (пробел)" aria-label="Играть"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.5v11l9-5.5z"/></svg></button>
+            <button id="wv-stop" class="tp" title="Стоп: к маркеру" aria-label="Стоп"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 3.5h9v9h-9z"/></svg></button>
+            <button id="wv-rec" class="tp tp-rec" title="Запись (R), пробел — стоп" aria-label="Запись" aria-pressed="false" disabled><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5"/></svg></button>
+            <button id="wv-end" class="tp" title="К концу (End)" aria-label="К концу"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 2.5v11L10 8zM11 2.5h2v11h-2z"/></svg></button>
+            <b id="wv-time" class="mono wv-time">0:00.000</b>
+            <div class="level wv-level" title="Уровень входа"><i id="wv-level"></i></div>
+          </div>
           <div class="wv-plot">
             <canvas id="wv-canvas" class="wv-canvas"></canvas>
             <button id="wv-live" class="btn small wv-live" hidden>К реальному времени →</button>
@@ -239,14 +246,14 @@
             <span id="wv-cursor" class="mono wv-cursor">Наведите на волну</span>
             <div class="wv-actions">
               <button id="wv-all" class="btn ghost small">Вся запись</button>
-              <button id="wv-play" class="btn ghost small">▶ Играть</button>
             </div>
           </div>
           <p class="wv-keys">
             <span><kbd>⌘</kbd>/<kbd>Ctrl</kbd> + колесо — масштаб вокруг курсора</span>
             <span><kbd>Shift</kbd> + колесо — прокрутка по записи</span>
             <span><kbd>⌥</kbd> + колесо — усиление по высоте</span>
-            <span>Клик — маркер, <kbd>Пробел</kbd> — играть с маркера / пауза</span>
+            <span>Клик — маркер, <kbd>Пробел</kbd> — играть / пауза, во время записи — стоп</span>
+            <span><kbd>R</kbd> — запись, <kbd>Home</kbd> / <kbd>End</kbd> — к началу / к концу</span>
             <span>Перетаскивание — прокрутка, двойной клик — вся запись</span>
           </p>
           <p id="wv-status" class="note" role="status">Вход выключен.</p>

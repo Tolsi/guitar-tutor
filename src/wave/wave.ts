@@ -148,7 +148,6 @@ async function openInput() {
     start.textContent = "Вход включён";
     start.disabled = true;
     $<HTMLButtonElement>("wv-rec").disabled = false;
-    if (!recording) setRecording(true);
     await fillDevices(track.getSettings().deviceId ?? "");
   } catch (e) {
     console.error(e);
@@ -177,14 +176,49 @@ async function fillDevices(currentId: string) {
   sel.disabled = false;
 }
 
+const ICON = {
+  play: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.5v11l9-5.5z"/></svg>',
+  pause: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 2.5h3v11h-3zM9.5 2.5h3v11h-3z"/></svg>',
+};
+
 function setRecording(on: boolean) {
-  if (on && store?.full) return;
+  if (on && (!store || !ctx || store.full)) return;
+  if (on) stopPlay();
   recording = on;
-  const btn = $<HTMLButtonElement>("wv-rec");
-  btn.textContent = on ? "Пауза" : "Продолжить запись";
-  btn.classList.toggle("rec-on", on);
+  $("wv-rec").classList.toggle("on", on);
+  $("wv-rec").setAttribute("aria-pressed", String(on));
   if (on) follow = true;
   clampView();
+}
+
+function stopAll() {
+  if (recording) setRecording(false);
+  if (play) stopPlay();
+  // Stop returns the playhead to the marker.
+  pausedAt = null;
+}
+
+function toStart() {
+  const wasPlaying = !!play;
+  stopAll();
+  marker = 0;
+  follow = false;
+  viewStart = 0;
+  clampView();
+  if (wasPlaying) togglePlay();
+}
+
+function toEnd() {
+  stopAll();
+  marker = total();
+  follow = true;
+  clampView();
+}
+
+/** Space: stops a recording, otherwise play / pause. */
+function spaceAction() {
+  if (recording) setRecording(false);
+  else togglePlay();
 }
 
 const playPos = () => (play && ctx ? play.from + (ctx.currentTime - play.at) : null);
@@ -195,7 +229,8 @@ function stopPlay(pause = false) {
   play.src.onended = null;
   play.src.stop();
   play = null;
-  $("wv-play").textContent = "▶ Играть";
+  $("wv-play").innerHTML = ICON.play;
+  $("wv-play").classList.remove("on");
 }
 
 function setMarker(t: number) {
@@ -210,6 +245,7 @@ function setMarker(t: number) {
 function togglePlay() {
   if (play) return stopPlay(true);
   if (!ctx || !store || !store.length) return;
+  if (recording) setRecording(false);
   let from = pausedAt ?? marker ?? viewStart;
   if (from >= total() - 0.01) from = marker ?? 0;
   pausedAt = null;
@@ -224,7 +260,8 @@ function togglePlay() {
   void ctx.resume();
   src.start();
   play = { src, from, at: ctx.currentTime };
-  $("wv-play").textContent = "❚❚ Пауза";
+  $("wv-play").innerHTML = ICON.pause;
+  $("wv-play").classList.add("on");
 }
 
 function clearAll() {
@@ -234,7 +271,6 @@ function clearAll() {
   viewSpan = 3;
   hoverX = null;
   marker = pausedAt = null;
-  if (store && ctx && !recording) setRecording(true);
   clampView();
 }
 
@@ -432,12 +468,20 @@ function renderStats() {
   if (at !== null) {
     const m = Math.floor(at / 60);
     const what = play ? "Играет" : pausedAt !== null ? "Пауза на" : "Маркер";
-    cur.textContent = `${what} ${m}:${(at - m * 60).toFixed(3).padStart(6, "0")} · пробел — ${play ? "пауза" : "играть"}`;
-  } else cur.textContent = follow && recording ? "Режим реального времени · клик по волне ставит маркер" : "Клик по волне ставит маркер";
+    cur.textContent = `${what} ${m}:${(at - m * 60).toFixed(3).padStart(6, "0")}`;
+  } else cur.textContent = recording ? "Идёт запись · пробел — стоп" : "Клик по волне ставит маркер";
+}
+
+function renderTime() {
+  const t = recording ? total() : (playPos() ?? pausedAt ?? marker ?? 0);
+  const m = Math.floor(t / 60);
+  $("wv-time").textContent = `${m}:${(t - m * 60).toFixed(3).padStart(6, "0")}`;
+  $("wv-time").classList.toggle("rec", recording);
 }
 
 function loop() {
   if (!visible) return;
+  renderTime();
   const pos = playPos();
   if (pos !== null && !drag && (pos > viewStart + viewSpan || pos < viewStart)) {
     follow = false;
@@ -548,17 +592,27 @@ over.addEventListener("pointermove", (e) => {
 
 $("wv-start").addEventListener("click", () => void openInput());
 $("wv-rec").addEventListener("click", () => setRecording(!recording));
+$("wv-stop").addEventListener("click", stopAll);
+$("wv-home").addEventListener("click", toStart);
+$("wv-end").addEventListener("click", toEnd);
 $("wv-clear").addEventListener("click", clearAll);
 $("wv-play").addEventListener("click", togglePlay);
 
+const KEYS: Record<string, () => void> = {
+  Space: spaceAction,
+  Home: toStart,
+  End: toEnd,
+  KeyR: () => setRecording(!recording),
+};
 window.addEventListener("keydown", (e) => {
-  if (!visible || e.code !== "Space" || e.repeat || e.metaKey || e.ctrlKey || e.altKey) return;
+  const act = KEYS[e.code];
+  if (!visible || !act || e.repeat || e.metaKey || e.ctrlKey || e.altKey) return;
   const t = e.target as HTMLElement;
   if (t.closest("input, select, textarea, [contenteditable]")) return;
   e.preventDefault();
   // Space on a focused button would also click it.
   if (t instanceof HTMLButtonElement) t.blur();
-  togglePlay();
+  act();
 });
 $("wv-all").addEventListener("click", showAll);
 $("wv-live").addEventListener("click", () => {

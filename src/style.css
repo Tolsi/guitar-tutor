@@ -373,3 +373,27 @@ kbd {
   border-radius: 4px;
   padding: 0 5px;
 }
+
+.wv-transport { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.tp {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 36px;
+  color: var(--ink);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  cursor: pointer;
+}
+.tp svg { width: 16px; height: 16px; fill: currentColor; }
+.tp:hover:not(:disabled) { border-color: var(--muted); }
+.tp:disabled { opacity: 0.4; cursor: default; }
+.tp.on { background: var(--accent); border-color: var(--accent); color: var(--stage); }
+.tp-rec { color: var(--bad); }
+.tp-rec.on { background: var(--bad); border-color: var(--bad); color: #fff; animation: rec-pulse 1.2s ease-in-out infinite; }
+@keyframes rec-pulse { 50% { opacity: 0.6; } }
+@media (prefers-reduced-motion: reduce) { .tp-rec.on { animation: none; } }
+.wv-time { font-size: 1.15rem; font-weight: 500; margin-left: 8px; min-width: 9ch; }
+.wv-time.rec { color: var(--bad); }
+.wv-transport .wv-level { flex: 1; min-width: 80px; margin-left: 8px; }
