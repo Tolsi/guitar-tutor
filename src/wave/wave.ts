@@ -1,7 +1,7 @@
 import workletUrl from "./capture-worklet.ts?worker&url";
 import { SampleStore } from "./store";
 import type { ChannelMode } from "./capture-worklet";
-import { checkPitches, isPalmMuted, noteOf, type PitchCheck, type PmNote } from "./pm";
+import { LOW_LIMIT_K, checkPitches, isPalmMuted, noteOf, type PitchCheck, type PmNote } from "./pm";
 import { AMPS, MONITOR_DEFAULTS, Monitor, type DistType, type MonitorSettings } from "./monitor";
 import { Timeline, clipEnd, encodeWav, type Clip, type Take } from "./timeline";
 
@@ -34,6 +34,8 @@ interface Settings {
   /** Fit the wave height to the visible peak. */
   autoGain: boolean;
   mon: MonitorSettings;
+  /** Settings format revision, for moving old defaults. */
+  rev: number;
 }
 function loadSettings(): Settings {
   const def = (): Settings => ({
@@ -43,7 +45,7 @@ function loadSettings(): Settings {
     monOn: true,
     exercise: "free",
     pmLimMs: 350,
-    attLimMs: 40,
+    attLimMs: 70,
     bpm: 120,
     grid: "4",
     inGainDb: 0,
@@ -53,11 +55,14 @@ function loadSettings(): Settings {
     gateMarginDb: 10,
     autoGain: true,
     mon: { ...MONITOR_DEFAULTS },
+    rev: 2,
   });
   try {
     const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? "{}");
     const d = def();
-    return { ...d, ...saved, mon: { ...d.mon, ...(saved.mon ?? {}) } };
+    // Rev 2: real recordings put a clean pick attack at 30–55 ms, so the old 40 ms default flagged most notes.
+    if ((saved.rev ?? 1) < 2 && saved.attLimMs === 40) delete saved.attLimMs;
+    return { ...d, ...saved, rev: 2, mon: { ...d.mon, ...(saved.mon ?? {}) } };
   } catch {
     return def();
   }
@@ -1524,7 +1529,7 @@ const focusTake = (): Take | null => rec?.take ?? selClip?.take ?? tl?.takes.at(
 const pmLimit = () => settings.pmLimMs / 1000;
 const attLimit = () => settings.attLimMs / 1000;
 /** A palm-muted note may sit this far from the open string and still count as the same note. */
-const PITCH_TOL = 25;
+const PITCH_TOL = 30;
 
 const fmtSec = (t: number) => (t < 1 ? `${Math.round(t * 1000)} мс` : `${t.toFixed(2).replace(".", ",")} с`);
 const fmtT20 = (n: PmNote) => (n.t20 === null ? "…" : `${n.t20Measured ? "" : "≈"}${fmtSec(n.t20)}`);
@@ -1769,7 +1774,7 @@ function applyExercise() {
     el.setAttribute("aria-checked", String(el.dataset.ex === settings.exercise));
   $("pm-card").hidden = !isPm;
   $<HTMLInputElement>("pm-lim").value = String(settings.pmLimMs);
-  $("pm-lim-v").textContent = fmtSec(pmLimit());
+  $("pm-lim-v").textContent = `${fmtSec(pmLimit())} (5–6 струны — ${fmtSec(pmLimit() * LOW_LIMIT_K)})`;
   $<HTMLInputElement>("pm-att-lim").value = String(settings.attLimMs);
   $("pm-att-lim-v").textContent = `${settings.attLimMs} мс`;
   pmKey = "";

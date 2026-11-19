@@ -13,6 +13,28 @@ const REFRACTORY = 16;
 const PEAK_SEARCH = 8;
 /** A second pick hit beats everything in the period before it by this energy ratio. */
 const DOUBLE_K = 2.5;
+/** Closer bursts are one stroke: the pick touching the string, then leaving it. */
+const DOUBLE_MIN_S = 0.025;
+/** A much quieter hit (by PRE_HIT_DB) up to PRE_HIT_S before a note is a false start: the pick struck, stopped, struck again. */
+const PRE_HIT_S = 0.5;
+const PRE_HIT_DB = 12;
+/**
+ * A pick hit starts with a burst of high frequencies, this much (dB) above the 100 ms before it. A hand
+ * stopping the string, handling noise, hum and distortion swelling on a held note do not have one
+ * (real recordings: pick hits 19–54 dB, the rest under 16).
+ */
+const HIT_HF_DB = 16;
+/** Sounds this much quieter than the notes around them (last 10 s) are noise, unless they lead into a note. */
+const QUIET_DB = 15;
+/** Hops after the onset before it is judged a hit or not (150 ms: the touch sound, then the note). */
+const JUDGE_AFTER = 30;
+/** Pitch: measured on the settled note, after the pick's sharp first moments, over PITCH_N samples. */
+const PITCH_DELAY_S = 0.04;
+const PITCH_N = 4096;
+/** The exact pitch waits a little longer: a string struck again while ringing takes ~50 ms to settle. */
+const REFINE_DELAY_S = 0.06;
+/** A long note's pitch is measured again from this far after the peak. */
+const LATE_PITCH_S = 0.25;
 /** Spectral-flux onsets: FFT size, compared frame lag (hops), bins up to this frequency. */
 const FLUX_N = 1024;
 const FLUX_LAG = 2;
@@ -72,6 +94,12 @@ export class PmAnalyzer {
   private lastOnset = -1e9;
   /** Notes whose pitch has been measured (once: the window is complete by then). */
   private pitched = new WeakSet<PmNote>();
+  private refined = new WeakSet<PmNote>();
+  private refinedLate = new WeakSet<PmNote>();
+  /** Notes already checked for being a pick hit at all. */
+  private judged = new WeakSet<PmNote>();
+  /** Quiet pick hits dropped as notes, kept briefly: one right before a note makes it a double attack. */
+  private ghosts: { start: number; peakDb: number }[] = [];
   /** Bumped whenever a note is added or changes. */
   version = 0;
 
@@ -84,6 +112,7 @@ export class PmAnalyzer {
     this.notes = [];
     this.lastOnset = -1e9;
     this.logSpec = [];
+    this.ghosts = [];
     this.version++;
   }
 
@@ -132,8 +161,11 @@ export class PmAnalyzer {
     }
     // Re-measure notes that are still ringing.
     for (let i = this.notes.length - 1; i >= 0; i--) {
+      // Measuring may merge false starts into the note, removing the notes before it.
+      if (i >= this.notes.length) continue;
       const n = this.notes[i];
-      if (n.done) break;
+      // A short sound may die out before it is judged; it still is, once.
+      if (n.done && this.judged.has(n)) break;
       this.measure(n, i, store);
     }
     if (first !== this.frames) this.version++;
@@ -150,11 +182,15 @@ export class PmAnalyzer {
       // The pick stopping a ringing string can trip the flux detector before the hit itself: a much
       // louder attack right after moves the note to it (the pick time stays part of its attack).
       const prev = this.notes.at(-1);
-      if (!prev || prev.done || e[k] < this.env[prev.start / this.hop] + 3) return;
+      if (!prev || prev.done || k - prev.start / this.hop > REFRACTORY || e[k] < this.env[prev.start / this.hop] + 3) return;
       let on = k;
       while (on > k - ONSET_LOOKBACK && e[on - 1] > lo + 3) on--;
       const moved = this.newNote(on);
       moved.lead = prev.start;
+      if (prev.doubleGap !== null && prev.doubleChecked) {
+        moved.doubleGap = prev.doubleGap + (moved.start - prev.start) / this.sr;
+        moved.doubleChecked = true;
+      }
       this.notes[this.notes.length - 1] = moved;
       this.lastOnset = k;
       this.version++;
@@ -283,6 +319,45 @@ export class PmAnalyzer {
     for (let j = s; j < Math.min(end, s + PEAK_SEARCH); j++) if (e[j] > e[pk]) pk = j;
     if (pk >= end - 1) return;
     n.peakDb = e[pk];
+    // Judged once the attack is complete (the pick's touch sound alone would pass for a quiet hit).
+    if (!this.judged.has(n) && (end - s >= JUDGE_AFTER || endFrame !== undefined || next !== undefined || n.done)) {
+      this.judged.add(n);
+      const verdict = this.judgeHit(n, s, end);
+      if (verdict !== "note") {
+        if (verdict === "ghost") this.ghosts.push({ start: n.start, peakDb: n.peakDb });
+        this.notes.splice(idx, 1);
+        // The note before rang on through this sound: measure it again up to the next real note.
+        const prev = this.notes[idx - 1];
+        if (prev) prev.done = false;
+        // Not a hit: it must not hold off the next one.
+        if (this.lastOnset * this.hop >= n.start) this.lastOnset = -1e9;
+        this.version++;
+        return;
+      }
+    }
+    // False starts: much quieter hits just before this note (the pick struck, stopped, then struck
+    // again) are part of this stroke, not notes of their own.
+    for (let p = this.notes[idx - 1]; idx > 0 && p && p.done; p = this.notes[idx - 1]) {
+      const gap = n.start - p.start;
+      if (gap > PRE_HIT_S * this.sr || p.peakDb > n.peakDb - PRE_HIT_DB) break;
+      this.notes.splice(--idx, 1);
+      n.doubleGap ??= gap / this.sr;
+      n.doubleChecked = true;
+      this.version++;
+    }
+    // The same for quiet hits already dropped as notes of their own.
+    for (let g = this.ghosts.length - 1; g >= 0; g--) {
+      const gh = this.ghosts[g];
+      const gap = n.start - gh.start;
+      if (gap <= 0) continue;
+      if (gap > PRE_HIT_S * this.sr) break;
+      if (gh.peakDb > n.peakDb - PRE_HIT_DB) continue;
+      n.doubleGap ??= gap / this.sr;
+      n.doubleChecked = true;
+      this.version++;
+      break;
+    }
+    while (this.ghosts.length && n.start - this.ghosts[0].start > PRE_HIT_S * this.sr) this.ghosts.shift();
     const floor = Math.max(GATE_DB - 5, n.peakDb - 50);
 
     let t20 = -1;
@@ -315,9 +390,37 @@ export class PmAnalyzer {
       n.t20Measured = false;
     }
     // Pitch from just after the level peak: the pick noise before it has no pitch.
-    if (!this.pitched.has(n) && end - pk >= 0.06 / HOP_S) {
-      this.pitched.add(n);
-      this.spectrum(n, store, pk * H);
+    // On the settled note when it lasts long enough (the pick stopping a ringing string, and the sharp
+    // first moments, are over by then), else right after the peak.
+    const closed = endFrame !== undefined || next !== undefined;
+    if (!this.pitched.has(n)) {
+      const lateOk = end - pk >= (PITCH_DELAY_S + 2048 / this.sr) / HOP_S;
+      if (lateOk || (closed && end - pk >= 0.06 / HOP_S)) {
+        this.pitched.add(n);
+        this.spectrum(n, store, pk * H + (lateOk ? Math.round(this.sr * (PITCH_DELAY_S - 0.01)) : 0));
+      }
+    }
+    // Then the exact pitch, once the settled part of the note is in (or the note has ended).
+    if (n.f0 !== null && !this.refined.has(n)) {
+      const from = pk * H + Math.round(this.sr * REFINE_DELAY_S);
+      const avail = Math.min(end * H, store.length) - from;
+      if (avail >= PITCH_N || (closed && avail >= PITCH_N / 2)) {
+        this.refined.add(n);
+        this.refinePitch(n, store, from, avail >= PITCH_N ? PITCH_N : PITCH_N / 2);
+      }
+    }
+    // A long ringing note: once more on its steady part (a hard pick raises the pitch for ~0.1–0.2 s).
+    if (n.f0 !== null && this.refined.has(n) && !this.refinedLate.has(n)) {
+      const at = pk + Math.round(LATE_PITCH_S / HOP_S);
+      if (end - at >= (2 * PITCH_N) / H && e[at] >= n.peakDb - 15) {
+        // Wait for 4× the window if the note keeps ringing: the fundamental's peak sharpens with length
+        // (distortion and the other strings make it wobble over shorter spans).
+        const long = end - at >= (4 * PITCH_N) / H;
+        if (long || closed || e[end - 1] < n.peakDb - 15) {
+          this.refinedLate.add(n);
+          this.refinePitch(n, store, at * H, long ? 4 * PITCH_N : 2 * PITCH_N);
+        }
+      } else if (end - at < (2 * PITCH_N) / H && (closed || e[Math.min(at, end - 1)] < n.peakDb - 15)) this.refinedLate.add(n);
     }
     if (!n.doubleChecked && (n.bright !== null || n.pitchClarity !== null)) this.doubleAttack(n, store, end * H);
     if (n.attack === null && end - s > PEAK_SEARCH) n.attack = this.attackTime(n, store, (pk + 1) * H);
@@ -366,15 +469,10 @@ export class PmAnalyzer {
       for (let j = Math.max(lo, b - per); j <= b - 1; j++) prevMax = Math.max(prevMax, be[j]);
       return be[b] > DOUBLE_K * prevMax;
     };
-    // A weaker hit before the main one…
-    for (let b = 1; b <= p1 - 5; b++)
-      if (isHit(b, 0)) {
-        n.doubleGap = ((p1 - b) * blk) / sr;
-        return;
-      }
-    // …or after it, from one period on: within the first period the window would miss the main hit's
-    // own repeat, and the excitation's ripples would pass for a hit.
-    for (let b = p1 + Math.max(5, per - 1); b < nb; b++)
+    // A second hit after the main one. Bursts closer than DOUBLE_MIN_S are the pick touching and then
+    // leaving the string (one stroke, heard on real recordings at 5–20 ms), and within the first period
+    // the excitation's ripples would pass for a hit.
+    for (let b = p1 + Math.max(Math.round(DOUBLE_MIN_S * 1000), per - 1); b < nb; b++)
       if (isHit(b, 0)) {
         n.doubleGap = ((b - p1) * blk) / sr;
         return;
@@ -453,7 +551,8 @@ export class PmAnalyzer {
     };
     let touch = sound;
     if (!ringing) {
-      const thr = Math.max(quietest(a, sound) * 3, 1e-4);
+      // Above the noise's own blips too: the touch is within ~25 dB of the note, noise clicks far below.
+      const thr = Math.max(quietest(a, sound) * 3, peak * 0.03, 1e-4);
       const t = earliest(a, thr);
       if (t >= 0) touch = t;
       else while (touch > 0 && a[touch - 1] > thr) touch--;
@@ -547,7 +646,8 @@ export class PmAnalyzer {
       const share = peaks > 0 ? onH / peaks : 0;
       // The hit added little of its own (the same string struck again about as hard): the mix is
       // dominated by this string anyway, so the plain autocorrelation is right.
-      if (!fc || share < 0.5 || total < 0.3 * post.reduce((q, v) => q + v, 0)) {
+      // So does a hit that left the mix no louder than before (the ringing string stopped and struck again).
+      if (!fc || share < 0.5 || ePost <= ePre || total < 0.3 * post.reduce((q, v) => q + v, 0)) {
         plain();
         if (lag < 0) return;
       } else if (best >= 0.6 && (plain(), lag > 0) && Math.abs(12 * Math.log2((fc * lag) / sr)) < 1.5) {
@@ -575,6 +675,74 @@ export class PmAnalyzer {
     const shift = den !== 0 ? Math.max(-0.5, Math.min(0.5, (0.5 * (a - c)) / den)) : 0;
     n.f0 = sr / (lag + shift);
     this.bright(n, post);
+  }
+
+  /**
+   * Is this onset a pick hit? "noise": no pick burst (a hand stopping the string, handling noise,
+   * distortion swelling on a held note). "ghost": a pick hit, but far quieter than the notes around it.
+   */
+  private judgeHit(n: PmNote, s: number, end: number): "note" | "ghost" | "noise" {
+    const hf = this.hopHf;
+    let now = 0;
+    for (let j = Math.max(0, s - 1); j <= Math.min(end - 1, s + 3); j++) now = Math.max(now, hf[j]);
+    // The median of the 100 ms before: the previous hit's own burst (fast picking) does not raise it.
+    const prior: number[] = [];
+    for (let j = Math.max(0, s - 24); j < s - 3; j++) prior.push(hf[j]);
+    const cnt = prior.length;
+    if (cnt >= 4) {
+      prior.sort((p, q) => p - q);
+      const before = prior[cnt >> 1];
+      if (!(now > before * 10 ** (HIT_HF_DB / 10))) return "noise";
+    } else return "noise"; // the very start of the take: a sound cut in, not a hit heard whole
+    let loud = -Infinity;
+    const from = n.start - 10 * this.sr;
+    for (const m of this.notes) if (m !== n && m.start >= from && m.start < n.start + 10 * this.sr) loud = Math.max(loud, m.peakDb);
+    if (n.peakDb < loud - QUIET_DB) return "ghost";
+    // A rattle or a knock with no clear pitch, clearly quieter than the notes: not a note either. (A
+    // dead palm-muted thud as loud as the others is a note, a bad one.)
+    if (n.pitchClarity !== null && n.pitchClarity < 0.8 && n.peakDb < loud - 6) return "noise";
+    return "note";
+  }
+
+  /**
+   * Exact pitch near the coarse f0: the peak of the fundamental (Hann-windowed DFT, 1-cent steps). The
+   * autocorrelation follows all harmonics, and a string's upper harmonics run sharp (stiffness), which
+   * reads 10–20 cents high; a tuner, and the ear, go by the fundamental.
+   */
+  private refinePitch(n: PmNote, store: SampleStore, from: number, N: number) {
+    const x = store.slice(from, from + N);
+    // Other strings still ringing put partials next to this fundamental and skew its peak: keep the
+    // autocorrelation then. Measured before the pick's touch sound (up to ~120 ms before the note).
+    const meanSq = (a: Float32Array) => a.reduce((q, v) => q + v * v, 0) / Math.max(1, a.length);
+    const b0 = n.start - Math.round(this.sr * 0.25), b1 = n.start - Math.round(this.sr * 0.15);
+    if (b0 >= 0 && meanSq(store.slice(b0, b1)) > 0.03 * meanSq(x)) return;
+    const w = new Float64Array(N);
+    for (let i = 0; i < N; i++) w[i] = x[i] * (0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (N - 1)));
+    const mag = (f: number) => {
+      const c = 2 * Math.cos((2 * Math.PI * f) / this.sr);
+      let s1 = 0, s2 = 0;
+      for (let i = 0; i < N; i++) {
+        const s0 = w[i] + c * s1 - s2;
+        s2 = s1;
+        s1 = s0;
+      }
+      return s1 * s1 + s2 * s2 - c * s1 * s2;
+    };
+    const scan = (k: number) => {
+      let bf = 0, bm = -1;
+      for (let c = -60; c <= 60; c++) {
+        const f = k * n.f0! * 2 ** (c / 1200);
+        const m = mag(f);
+        if (m > bm) (bm = m), (bf = f);
+      }
+      return { f: bf / k, m: bm, edge: Math.abs(bf / (k * n.f0!) - 1) > 0.034 };
+    };
+    // The fundamental, unless it is buried (well below the 2nd harmonic): then the 2nd harmonic.
+    let r = scan(1);
+    const h2 = scan(2);
+    if (r.m < h2.m * 0.01) r = h2;
+    if (r.edge || r.m <= 0) return;
+    n.f0 = r.f;
   }
 
   /** Hann-windowed magnitude spectrum up to 8 kHz. */
@@ -634,8 +802,16 @@ function fft(re: Float64Array, im: Float64Array) {
   }
 }
 
-/** Palm mute when the note loses 20 dB faster than limitS. */
-export const isPalmMuted = (n: PmNote, limitS: number) => (n.t20 === null ? null : n.t20 <= limitS);
+/**
+ * The two bass strings ring much longer, muted too (real recordings: a good mute on A2/E2 loses 20 dB in
+ * 0.45–0.75 s, an unmuted E2 in ~0.8 s and more, the top four strings in 0.15–0.3 s when muted).
+ */
+const LOW_F0 = 125;
+export const LOW_LIMIT_K = 2.15;
+/** The 20 dB decay limit for this note's string. */
+export const pmLimitFor = (n: PmNote, limitS: number) => (n.f0 !== null && n.f0 < LOW_F0 ? limitS * LOW_LIMIT_K : limitS);
+/** Palm mute when the note loses 20 dB faster than the limit (longer on the bass strings). */
+export const isPalmMuted = (n: PmNote, limitS: number) => (n.t20 === null ? null : n.t20 <= pmLimitFor(n, limitS));
 
 /** Open strings in standard tuning, as MIDI numbers: E2 A2 D3 G3 B3 E4. */
 export const OPEN_STRINGS = [40, 45, 50, 55, 59, 64];
