@@ -35,6 +35,12 @@ const REPICK_FLUX = 0.07;
 const REPICK_FALL_DB = 8;
 /** Over a ringing string, a new note's harmonics hold at least this share of what the pick added. */
 const NEW_STRING_SHARE = 0.71;
+/** A knock or quiet hit up to this long before a note is the pick landing on the strings: the attack starts there. */
+const PRE_TOUCH_S = 0.6;
+/** How far before the note the pick's first touch is looked for in the sound itself. */
+const TOUCH_WINDOW_S = 0.16;
+/** A knock or slap: gone (−20 dB) faster than this, and quieter than the notes. A palm-muted note takes 0.15 s+. */
+const KNOCK_T20_S = 0.09;
 /** Hops after the onset before it is judged a hit or not (150 ms: the touch sound, then the note). */
 const JUDGE_AFTER = 30;
 /** Pitch: measured on the settled note, after the pick's sharp first moments, over PITCH_N samples. */
@@ -109,6 +115,8 @@ export class PmAnalyzer {
   private judged = new WeakSet<PmNote>();
   /** Quiet pick hits dropped as notes, kept briefly: one right before a note makes it a double attack. */
   private ghosts: { start: number; peakDb: number }[] = [];
+  /** Pick contacts that were not notes (quiet hits, knocks of the pick landing on the strings), for attacks. */
+  private contacts: number[] = [];
   /** Bumped whenever a note is added or changes. */
   version = 0;
 
@@ -122,6 +130,7 @@ export class PmAnalyzer {
     this.lastOnset = -1e9;
     this.logSpec = [];
     this.ghosts = [];
+    this.contacts = [];
     this.version++;
   }
 
@@ -334,6 +343,7 @@ export class PmAnalyzer {
       const verdict = this.judgeHit(n, s, end);
       if (verdict !== "note") {
         if (verdict === "ghost") this.ghosts.push({ start: n.start, peakDb: n.peakDb });
+        if (verdict !== "noise") this.contacts.push(n.start);
         this.notes.splice(idx, 1);
         // The note before rang on through this sound: measure it again up to the next real note.
         const prev = this.notes[idx - 1];
@@ -443,7 +453,21 @@ export class PmAnalyzer {
       } else if (end - at < (2 * PITCH_N) / H && (closed || e[Math.min(at, end - 1)] < n.peakDb - 15)) this.refinedLate.add(n);
     }
     if (!n.doubleChecked && (n.bright !== null || n.pitchClarity !== null)) this.doubleAttack(n, store, end * H);
-    if (n.attack === null && end - s > PEAK_SEARCH) n.attack = this.attackTime(n, store, (pk + 1) * H);
+    if (n.attack === null && end - s > PEAK_SEARCH) {
+      n.attack = this.attackTime(n, store, (pk + 1) * H);
+      // The pick may have landed on the strings well before (a knock, or a quiet hit), rested, then struck:
+      // the attack runs from that first contact, if it came after the previous note's own attack.
+      if (n.attack !== null && n.touchAt !== null && n.soundAt !== null) {
+        const prev = this.notes[idx - 1];
+        const after = Math.max(n.start - PRE_TOUCH_S * this.sr, prev ? (prev.soundAt ?? prev.start) + 0.1 * this.sr : 0);
+        const first = this.contacts.find((c) => c >= after && c < n.touchAt!);
+        if (first !== undefined) {
+          n.touchAt = first;
+          n.attack = (n.soundAt - first) / this.sr;
+        }
+      }
+      while (this.contacts.length && n.start - this.contacts[0] > PRE_TOUCH_S * this.sr) this.contacts.shift();
+    }
   }
 
   /**
@@ -501,22 +525,45 @@ export class PmAnalyzer {
 
   private attackTime(n: PmNote, store: SampleStore, peakEnd: number) {
     const B = Math.max(8, Math.round(this.sr * 0.0005)); // 0.5 ms peak-hold blocks
-    const from = Math.max(2, n.start - Math.round(this.sr * 0.15));
+    // The pick may rest on the string well before the note (touch, a pause, then the stroke): look back
+    // TOUCH_WINDOW_S, but not into the previous note's own attack.
+    const prev = this.notes[this.notes.indexOf(n) - 1];
+    const from = Math.max(
+      2,
+      n.start - Math.round(this.sr * (TOUCH_WINDOW_S + 0.05)),
+      prev ? (prev.soundAt ?? prev.start) + Math.round(this.sr * 0.06) : 0,
+    );
     const to = Math.min(store.length, peakEnd);
     const nb = Math.floor((to - from) / B);
     if (nb < 8) return null;
-    // Peak amplitude and peak high-frequency content (second difference) per block.
-    const a = new Float32Array(nb), h = new Float32Array(nb);
+    // Peak amplitude, energy and peak high-frequency content (second difference) per block.
+    const a = new Float32Array(nb), h = new Float32Array(nb), sq = new Float32Array(nb);
     for (let b = 0; b < nb; b++) {
-      let m = 0, mh = 0;
+      let m = 0, mh = 0, ss = 0;
       for (let i = from + b * B, e = i + B; i < e; i++) {
         const v = store.at(i);
         m = Math.max(m, Math.abs(v));
+        ss += v * v;
         mh = Math.max(mh, Math.abs(v - 2 * store.at(i - 1) + store.at(i - 2)));
       }
       a[b] = m;
       h[b] = mh;
+      sq[b] = ss;
     }
+    // RMS over 2, 5 and 10 ms: the faint touch stands clear of the noise, whose single peaks are much
+    // higher; the 10 ms one also irons out the ripple of a low string's dying tail.
+    const movingRms = (w: number) => {
+      const out = new Float32Array(nb);
+      for (let b = 0, acc = 0; b < nb; b++) {
+        acc += sq[b] - (b >= w ? sq[b - w] : 0);
+        out[b] = Math.sqrt(Math.max(0, acc) / (Math.min(b + 1, w) * B));
+      }
+      return out;
+    };
+    const rms = movingRms(4);
+    const R10 = Math.round(0.01 / (B / this.sr));
+    const rms10 = movingRms(R10);
+    const rms5 = movingRms(Math.round(R10 / 2));
     // Start near the detected attack so the previous note's tail is not taken for this one.
     const near = Math.max(0, Math.floor((n.start - from - this.sr * 0.015) / B));
     const span = Math.max(4, Math.round(0.01 / (B / this.sr)));
@@ -537,7 +584,16 @@ export class PmAnalyzer {
     const per = Math.round(0.013 / (B / this.sr));
     let bg = 0;
     for (let b = Math.max(0, near - per); b < near; b++) bg = Math.max(bg, a[b]);
-    const ringing = bg > peak * 0.12;
+    // Ringing only if it never got quiet over the last TOUCH_WINDOW_S: just before the note there may be
+    // the pick's own touch and the start of the stroke, which are no ringing.
+    let calm = Infinity;
+    const lookBack = Math.round(TOUCH_WINDOW_S / (B / this.sr));
+    for (let b = Math.max(0, near - lookBack); b + span <= near; b++) {
+      let m = 0;
+      for (let j = b; j < b + span; j++) m = Math.max(m, a[j]);
+      calm = Math.min(calm, m);
+    }
+    const ringing = (isFinite(calm) ? calm : bg) > peak * 0.12;
     let sound = -1;
     if (!ringing || peak >= bg * 1.12) {
       // The note sounds once the level gets a third of the way from silence to the attack peak (the pick's
@@ -556,26 +612,53 @@ export class PmAnalyzer {
     }
     if (sound < 4) return null;
     // The pick touching the string is a small sound of its own before the note, often with a quieter
-    // stretch in between (the pick pressing the string). Take the earliest burst within 120 ms before
+    // stretch in between (the pick pressing the string). Take the earliest burst within TOUCH_WINDOW_S before
     // the note that rises clearly above the background — after a quiet moment, so the previous note's
     // tail does not count.
-    const win = Math.round(0.12 / (B / this.sr));
+    const win = Math.round(TOUCH_WINDOW_S / (B / this.sr));
     const lo = Math.max(0, sound - win);
+    // A burst starts after a quiet moment, or as a clear rise over the previous note's dying tail: twice
+    // its peaks 15–25 ms earlier (a whole low-E period), which a decaying tail never is.
+    const r0 = Math.round(0.015 / (B / this.sr)), r1 = Math.round(0.025 / (B / this.sr));
     const earliest = (x: Float32Array, thr: number) => {
       let quiet = false;
       for (let b = lo; b < sound - 1; b++) {
-        if (x[b] <= thr) quiet = true;
-        else if (quiet && x[b + 1] > thr) return b;
+        if (x[b] <= thr) {
+          quiet = true;
+          continue;
+        }
+        if (x[b + 1] <= thr) continue;
+        if (quiet) return b;
+        if (b - r1 >= lo) {
+          let m = 0;
+          for (let j = b - r1; j <= b - r0; j++) m = Math.max(m, x[j]);
+          if (x[b] > 2 * m) return b;
+        }
       }
       return -1;
     };
     let touch = sound;
     if (!ringing) {
-      // Above the noise's own blips too: the touch is within ~25 dB of the note, noise clicks far below.
-      const thr = Math.max(quietest(a, sound) * 3, peak * 0.03, 1e-4);
-      const t = earliest(a, thr);
+      // Above the noise's own blips: the touch is within ~35 dB of the note, noise clicks 45+ below. (The
+      // background, silence or the previous note's tail, is the rise rule's business.)
+      let peakRms = 0;
+      for (let b = near; b < nb; b++) peakRms = Math.max(peakRms, rms[b]);
+      const thr = Math.max(peakRms * 0.0178, 1e-5);
+      // The earliest clear rise: 6 dB over the quietest level 10–30 ms before it. A dying tail crossing
+      // the threshold, ripple and all, never rises like that.
+      let t = -1;
+      for (let b = Math.max(lo, 3 * R10); b < sound - 1 && t < 0; b++) {
+        if (rms5[b] <= thr) continue;
+        let base = Infinity;
+        for (let j = b - 3 * R10; j <= b - R10; j++) base = Math.min(base, rms10[j]);
+        if (rms5[b] >= 2 * base) {
+          // Back to where it left the quiet level (the 5 ms window trails the sound).
+          t = b;
+          while (t > b - R10 / 2 && rms[t - 1] > 2 * base) t--;
+        }
+      }
       if (t >= 0) touch = t;
-      else while (touch > 0 && a[touch - 1] > thr) touch--;
+      else while (touch > 0 && rms[touch - 1] > thr) touch--;
     } else {
       // A ringing string hides the pick in the level, but not in the high frequencies: the pick
       // touching or stopping the string is a burst well above the ringing's own edges.
@@ -707,7 +790,7 @@ export class PmAnalyzer {
    * Is this onset a pick hit? "noise": no pick burst (a hand stopping the string, handling noise,
    * distortion swelling on a held note). "ghost": a pick hit, but far quieter than the notes around it.
    */
-  private judgeHit(n: PmNote, s: number, end: number): "note" | "ghost" | "noise" {
+  private judgeHit(n: PmNote, s: number, end: number): "note" | "ghost" | "knock" | "noise" {
     const hf = this.hopHf;
     let now = 0;
     for (let j = Math.max(0, s - 1); j <= Math.min(end - 1, s + 3); j++) now = Math.max(now, hf[j]);
@@ -732,7 +815,9 @@ export class PmAnalyzer {
     if (repicked && n.peakDb < loud - 6) return "noise";
     // A rattle or a knock with no clear pitch, clearly quieter than the notes: not a note either. (A
     // dead palm-muted thud as loud as the others is a note, a bad one.)
-    if (n.pitchClarity !== null && n.pitchClarity < 0.8 && n.peakDb < loud - 6) return "noise";
+    if (n.pitchClarity !== null && n.pitchClarity < 0.8 && n.peakDb < loud - 6) return "knock";
+    // A knock on the guitar or a hand slapping the strings: dies at once.
+    if (n.t20 !== null && n.t20Measured && n.t20 < KNOCK_T20_S && n.peakDb < loud - 6) return "knock";
     return "note";
   }
 
