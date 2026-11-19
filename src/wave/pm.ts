@@ -26,6 +26,15 @@ const PRE_HIT_DB = 12;
 const HIT_HF_DB = 16;
 /** Sounds this much quieter than the notes around them (last 10 s) are noise, unless they lead into a note. */
 const QUIET_DB = 15;
+/**
+ * A re-pick over a sounding (distorted) string: the spectral flux beats its recent average by this much
+ * (real recordings: re-picks 0.07–0.22, distortion swelling on a held note 0.04–0.068)…
+ */
+const REPICK_FLUX = 0.07;
+/** …and the level holds within this many dB for the next 150 ms (a hand stopping the string: 15–30 dB). */
+const REPICK_FALL_DB = 8;
+/** Over a ringing string, a new note's harmonics hold at least this share of what the pick added. */
+const NEW_STRING_SHARE = 0.71;
 /** Hops after the onset before it is judged a hit or not (150 ms: the touch sound, then the note). */
 const JUDGE_AFTER = 30;
 /** Pitch: measured on the settled note, after the pick's sharp first moments, over PITCH_N samples. */
@@ -361,7 +370,8 @@ export class PmAnalyzer {
     const floor = Math.max(GATE_DB - 5, n.peakDb - 50);
 
     let t20 = -1;
-    let fitFrom = -1, fitTo = end - 1;
+    // Before the next note the pick may already be stopping the string: leave those 30 ms out of the fit.
+    let fitFrom = -1, fitTo = endFrame !== undefined || next ? Math.max(pk + 1, end - 7) : end - 1;
     for (let j = pk + 1; j < end; j++) {
       if (fitFrom < 0 && e[j] <= n.peakDb - 3) fitFrom = j;
       if (t20 < 0 && e[j] <= n.peakDb - 20) t20 = j;
@@ -381,12 +391,22 @@ export class PmAnalyzer {
       for (let j = fitFrom; j <= fitTo; j++) (num += (j - mt) * (e[j] - my)), (den += (j - mt) ** 2);
       const slope = den > 0 ? num / den : 0; // dB per frame
       n.rate = Math.max(0, (-slope * this.sr) / H);
+    } else if (endFrame !== undefined || next) {
+      // Ended (by the next note) with less than 3 dB lost, or too briefly to fit: what was measured
+      // while it rang on (perhaps the pick already stopping it for the next note) no longer holds.
+      // (The 3 dB point only in the left-out last 30 ms counts as holding level too.)
+      n.rate = fitFrom < 0 || fitFrom > fitTo ? 0 : null;
+      if (n.rate === null && t20 < 0) n.t20 = null;
     }
     if (t20 >= 0) {
       n.t20 = ((t20 - pk) * H) / this.sr;
       n.t20Measured = true;
     } else if (n.rate && n.rate > 0.5) {
       n.t20 = 20 / n.rate;
+      n.t20Measured = false;
+    } else if (n.rate === 0) {
+      // Hardly decayed at all before the next note: at most 3 dB over its length, so 20 dB take ≥ 20/3 of it.
+      n.t20 = (((end - pk) * H) / this.sr) * (20 / 3);
       n.t20Measured = false;
     }
     // Pitch from just after the level peak: the pick noise before it has no pitch.
@@ -614,20 +634,9 @@ export class PmAnalyzer {
       // the spectrum, find the pitch whose harmonics hold most of it, then refine on the autocorrelation.
       const d = post.map((v, b) => Math.max(0, v - (pre ? pre[b] * 1.1 : 0)));
       const binHz = sr / N;
-      const at = (f: number) => {
-        const p = f / binHz, i = Math.floor(p);
-        return i + 1 < d.length ? d[i] + (d[i + 1] - d[i]) * (p - i) : 0;
-      };
-      let fc = 0, sc = 0, total = 0;
+      let total = 0;
       for (let b = 1; b < d.length; b++) total += d[b];
-      // Subharmonic summation over all harmonics up to 5 kHz (compressed, so one loud partial does
-      // not decide): the true pitch collects every harmonic, a multiple of it only some.
-      for (let c = 0; c <= 1600; c++) {
-        const f = 70 * 2 ** (c / 400); // 3-cent steps, 70 Hz – 1.1 kHz
-        let v = 0;
-        for (let k = 1, w = 1; k * f < 5000; k++, w *= 0.92) v += Math.sqrt(at(f * k)) * w;
-        if (v > sc) (sc = v), (fc = f);
-      }
+      const fc = shs(d, binHz);
       // Most of what changed must sit on this note's harmonics, or there is no clear new pitch.
       const on = new Uint8Array(d.length);
       for (let k = 1; k * fc < 5000; k++) {
@@ -644,10 +653,27 @@ export class PmAnalyzer {
           if (on[b]) onH += d[b];
         }
       const share = peaks > 0 ? onH / peaks : 0;
-      // The hit added little of its own (the same string struck again about as hard): the mix is
-      // dominated by this string anyway, so the plain autocorrelation is right.
-      // So does a hit that left the mix no louder than before (the ringing string stopped and struck again).
-      if (!fc || share < 0.5 || ePost <= ePre || total < 0.3 * post.reduce((q, v) => q + v, 0)) {
+      // The same string picked again while it still rings (repeated notes, often through distortion that
+      // keeps it sounding): the whole mix has the previous note's pitch (distortion can leave the
+      // fundamental 20 dB under the 2nd harmonic: an octave up counts as well), and what the pick added
+      // does not clearly point elsewhere — distortion reshapes the partials at every pick.
+      const prevF0 = this.notes[this.notes.indexOf(n) - 1]?.f0 ?? null;
+      const near = (f: number, ref: number) => [1, 2].some((k) => Math.abs(1200 * Math.log2(f / (k * ref))) < 100);
+      // A new string over a ringing one adds its own clean harmonic series (share 0.71–0.93 in tests);
+      // distortion re-picked scatters what changed (0.31–0.70).
+      if (prevF0 !== null && near(shs(post, binHz), prevF0) && (!fc || share < NEW_STRING_SHARE || near(fc, prevF0))) {
+        n.pitchClarity = best;
+        const l0 = sr / prevF0;
+        for (let l = Math.max(minLag + 1, Math.floor(l0 * 0.97)); l <= Math.min(maxLag, Math.ceil(l0 * 1.03)); l++)
+          if (r[l] >= r[l - 1] && r[l] >= r[l + 1] && (lag < 0 || r[l] > r[lag])) lag = l;
+        if (lag < 0) {
+          n.f0 = prevF0;
+          this.bright(n, post);
+          return;
+        }
+        // Otherwise: the hit added little of its own (the same string struck again about as hard), or
+        // left the mix no louder than before — the mix is this string, the plain autocorrelation is right.
+      } else if (!fc || share < 0.5 || ePost <= ePre || total < 0.3 * post.reduce((q, v) => q + v, 0)) {
         plain();
         if (lag < 0) return;
       } else if (best >= 0.6 && (plain(), lag > 0) && Math.abs(12 * Math.log2((fc * lag) / sr)) < 1.5) {
@@ -689,19 +715,48 @@ export class PmAnalyzer {
     const prior: number[] = [];
     for (let j = Math.max(0, s - 24); j < s - 3; j++) prior.push(hf[j]);
     const cnt = prior.length;
+    let repicked = false;
     if (cnt >= 4) {
       prior.sort((p, q) => p - q);
       const before = prior[cnt >> 1];
-      if (!(now > before * 10 ** (HIT_HF_DB / 10))) return "noise";
+      if (!(now > before * 10 ** (HIT_HF_DB / 10))) {
+        if (!this.repick(n, s, end)) return "noise";
+        repicked = true;
+      }
     } else return "noise"; // the very start of the take: a sound cut in, not a hit heard whole
     let loud = -Infinity;
     const from = n.start - 10 * this.sr;
     for (const m of this.notes) if (m !== n && m.start >= from && m.start < n.start + 10 * this.sr) loud = Math.max(loud, m.peakDb);
     if (n.peakDb < loud - QUIET_DB) return "ghost";
+    // Without the pick's burst only the loudness vouches for it: a re-pick is about as loud as the notes.
+    if (repicked && n.peakDb < loud - 6) return "noise";
     // A rattle or a knock with no clear pitch, clearly quieter than the notes: not a note either. (A
     // dead palm-muted thud as loud as the others is a note, a bad one.)
     if (n.pitchClarity !== null && n.pitchClarity < 0.8 && n.peakDb < loud - 6) return "noise";
     return "note";
+  }
+
+  /**
+   * A string picked again while it (or a distorted tone) is still sounding: distortion keeps the high
+   * frequencies up all the time, so the pick's burst hardly shows, but the spectrum still jumps. Unlike
+   * distortion swelling on a held note (smaller jumps), and unlike a hand stopping the string (the level
+   * then falls), the sound goes on as loud.
+   */
+  private repick(n: PmNote, s: number, end: number) {
+    const e = this.env, f = this.flux;
+    let pre = -Infinity;
+    for (let j = Math.max(0, s - 6); j < s; j++) pre = Math.max(pre, e[j]);
+    if (pre < n.peakDb - 10) return false; // started from quiet: a real hit would have had its burst
+    let at = s, mx = 0;
+    for (let j = Math.max(0, s - 4); j <= Math.min(end - 2, s + 6); j++) if (f[j] > mx) (mx = f[j]), (at = j);
+    if (at < 43) return false;
+    let mean = 0;
+    for (let j = at - 40; j < at - 3; j++) mean += f[j];
+    mean /= 37;
+    if (mx - mean < REPICK_FLUX) return false;
+    let low = Infinity;
+    for (let j = s; j < Math.min(end, s + JUDGE_AFTER); j++) low = Math.min(low, e[j]);
+    return low >= n.peakDb - REPICK_FALL_DB;
   }
 
   /**
@@ -769,6 +824,25 @@ export class PmAnalyzer {
     }
     n.bright = total > 0 ? high / total : null;
   }
+}
+
+/**
+ * Subharmonic summation over all harmonics up to 5 kHz (compressed, so one loud partial does not
+ * decide): the true pitch collects every harmonic, a multiple of it only some. 3-cent steps, 70 Hz–1.1 kHz.
+ */
+function shs(d: Float64Array, binHz: number) {
+  const at = (f: number) => {
+    const p = f / binHz, i = Math.floor(p);
+    return i + 1 < d.length ? d[i] + (d[i + 1] - d[i]) * (p - i) : 0;
+  };
+  let fc = 0, sc = 0;
+  for (let c = 0; c <= 1600; c++) {
+    const f = 70 * 2 ** (c / 400);
+    let v = 0;
+    for (let k = 1, w = 1; k * f < 5000; k++, w *= 0.92) v += Math.sqrt(at(f * k)) * w;
+    if (v > sc) (sc = v), (fc = f);
+  }
+  return fc;
 }
 
 function fft(re: Float64Array, im: Float64Array) {
