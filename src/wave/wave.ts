@@ -750,6 +750,20 @@ const fmtDb = (v: number) => (v > 1e-6 ? `${(20 * Math.log10(v)).toFixed(1)} д�
 
 const RULER = 22;
 const MAX_GAIN = 300;
+/** Auto height never scales up sounds below this peak (−24 dBFS): they are not what is being played. */
+const AUTO_FLOOR = 10 ** (-24 / 20);
+let peakCache = { key: "", at: 0, peak: 0 };
+/** Loudest sample on the whole timeline, refreshed at most 5 times a second. */
+function loudestPeak() {
+  if (!tl) return 0;
+  const key = `${tl.clips.length}:${tl.length}`;
+  const now = performance.now();
+  if (key !== peakCache.key && now - peakCache.at > 200) {
+    const [mn, mx] = tl.range(0, tl.length);
+    peakCache = { key, at: now, peak: Math.max(-mn, mx, 0) };
+  }
+  return peakCache.peak;
+}
 /** Lanes shown: the used ones, plus an empty one while a clip is being dragged. */
 // No spare lane while dragging: it would shrink every lane (and the wave) the moment a clip is grabbed.
 // A new lane appears only when a clip is dropped into the bottom strip of the last lane (see pointermove).
@@ -803,13 +817,10 @@ function drawWave() {
   }
 
   if (settings.autoGain && tl && tl.length) {
-    const [mn, mx] = tl.range(Math.floor(viewStart * sr), Math.ceil((viewStart + viewSpan) * sr));
-    const peak = Math.max(-mn, mx);
-    if (peak > 1e-5) {
-      const want = Math.min(MAX_GAIN, Math.max(1, 0.85 / peak));
-      // Ease towards the target so the view does not jump on every note.
-      gain += (want - gain) * (want < gain ? 0.5 : 0.15);
-    }
+    // One steady height for the whole session: the loudest sound recorded so far fills 85 %, and nothing
+    // quieter than AUTO_FLOOR is ever blown up (silence and hiss at the start of a take stay small).
+    const want = Math.min(MAX_GAIN, Math.max(1, 0.85 / Math.max(loudestPeak(), AUTO_FLOOR)));
+    gain += (want - gain) * (want < gain ? 0.5 : 0.15);
   }
   if (tl && tl.clips.length) {
     const checks = new Map<Take, Map<PmNote, PitchCheck>>();
