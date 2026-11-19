@@ -295,7 +295,9 @@ async function ensureCtx() {
 
 async function openInput() {
   const status = $("wv-status");
+  const start = $<HTMLButtonElement>("wv-start");
   status.textContent = "Жду разрешения на микрофон…";
+  start.disabled = true;
   stream?.getTracks().forEach((t) => t.stop());
   source?.disconnect();
   node?.disconnect();
@@ -346,9 +348,8 @@ async function openInput() {
     inputSince = performance.now();
     const track = stream.getAudioTracks()[0];
     status.textContent = `Вход: ${track.label || "микрофон"}, ${sr / 1000} кГц`;
-    const start = $<HTMLButtonElement>("wv-start");
-    start.textContent = "Вход включён";
-    start.disabled = true;
+    start.textContent = "Выключить вход";
+    start.disabled = false;
     $<HTMLButtonElement>("wv-rec").disabled = !monitor;
     await fillDevices(track.getSettings().deviceId ?? "");
   } catch (e) {
@@ -360,7 +361,43 @@ async function openInput() {
         : err.name === "NotFoundError"
           ? "Аудиовход не найден. Подключите звуковую карту или микрофон."
           : `Не удалось включить вход: ${err.message}`;
+    start.disabled = false;
   }
+}
+
+/**
+ * Turns the input off and puts the input panel back as it was before it was switched on: recording and
+ * playback stop (what was recorded stays on the timeline), the device is released and can be chosen anew.
+ */
+function closeInput() {
+  stopAll();
+  stream?.getTracks().forEach((t) => t.stop());
+  source?.disconnect();
+  if (node) {
+    node.port.onmessage = null; // reports already on their way must not light the panel up again
+    node.disconnect();
+  }
+  if (tapFrom === node) tapFrom = null;
+  stream = null;
+  source = null;
+  node = null;
+  levelDb = -Infinity;
+  recentPeaks.length = 0;
+  rawPeaks.length = 0;
+  noiseDb = null;
+  showNoise();
+  const start = $<HTMLButtonElement>("wv-start");
+  start.textContent = "Включить аудиовход";
+  start.disabled = false;
+  $<HTMLButtonElement>("wv-rec").disabled = true;
+  const dev = $<HTMLSelectElement>("wv-device");
+  dev.replaceChildren(new Option("—"));
+  dev.disabled = true;
+  const chan = $<HTMLSelectElement>("wv-chan");
+  ["Авто", "Канал 1", "Канал 2"].forEach((t, i) => (chan.options[i].textContent = t));
+  chan.value = String(settings.channel);
+  chan.disabled = true;
+  $("wv-status").textContent = "Вход выключен.";
 }
 
 interface ChannelReport {
@@ -1162,7 +1199,7 @@ over.addEventListener("pointermove", (e) => {
   if (over.hasPointerCapture(e.pointerId)) seekOverview(e);
 });
 
-$("wv-start").addEventListener("click", () => void openInput());
+$("wv-start").addEventListener("click", () => (source ? closeInput() : void openInput()));
 $("wv-rec").addEventListener("click", () => setRecording(!recording));
 $("wv-stop").addEventListener("click", stopAll);
 $("wv-home").addEventListener("click", toStart);
@@ -1366,7 +1403,7 @@ chanSel.addEventListener("change", () => {
 $("wv-device").addEventListener("change", (e) => {
   settings.deviceId = (e.target as HTMLSelectElement).value;
   saveSettings();
-  if (ctx) void openInput();
+  if (source) void openInput();
 });
 renderEditState();
 
