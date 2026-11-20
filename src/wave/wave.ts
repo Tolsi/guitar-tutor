@@ -240,14 +240,24 @@ function setInGain(db: number) {
  * guitar beside it is what the exercise analysis listens to (distortion flattens attacks and pitch).
  */
 function onTapBlock(wet: Float32Array, dry: Float32Array) {
-  if (!recording || !rec) return;
+  if (!recording || !rec || !tl) return;
   const st = rec.take.store;
+  const room = st.maxLength - st.length;
   st.push(wet);
   rec.take.dry?.push(dry);
   rec.clip.to = st.length;
   if (st.full) {
-    setRecording(false);
-    $("wv-status").textContent = `Дубль достиг предела ${MAX_SECONDS / 60} мин. Нажмите ●, чтобы записать следующий.`;
+    // A take holds MAX_SECONDS; the recording goes on seamlessly in the next take, right after it.
+    const pos = clipEnd(rec.clip);
+    const lane = tl.freeLane(pos, MAX_SECONDS * sr, rec.clip.lane);
+    const take = tl.newTake(`Дубль ${tl.takeCount + 1}`, new SampleStore(MAX_SECONDS * sr), new SampleStore(MAX_SECONDS * sr));
+    rec = { take, clip: tl.addClip(take, 0, 0, pos, lane) };
+    if (selClip) selClip = rec.clip;
+    if (room < wet.length) {
+      take.store.push(wet.subarray(room));
+      take.dry?.push(dry.subarray(room));
+      rec.clip.to = take.store.length;
+    }
   }
 }
 
