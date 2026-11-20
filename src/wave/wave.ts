@@ -1577,7 +1577,9 @@ const focusTake = (): Take | null => rec?.take ?? selClip?.take ?? tl?.takes.at(
 const pmLimit = () => settings.pmLimMs / 1000;
 const attLimit = () => settings.attLimMs / 1000;
 /** A palm-muted note may sit this far from the open string and still count as the same note. */
-const PITCH_TOL = 30;
+const PITCH_TOL = 10;
+/** Farther than this from the nearest note of A4 = 440 Hz tuning, the note is out of tune. */
+const TUNE_TOL = 10;
 
 const fmtSec = (t: number) => (t < 1 ? `${Math.round(t * 1000)} мс` : `${t.toFixed(2).replace(".", ",")} с`);
 const fmtT20 = (n: PmNote) => (n.t20 === null ? "…" : `${n.t20Measured ? "" : "≈"}${fmtSec(n.t20)}`);
@@ -1611,6 +1613,8 @@ interface PmVerdict {
   /** Problems with the pick attack, independent of the mute. */
   slowAttack: boolean;
   double: boolean;
+  /** Cents off the nearest note of standard tuning, when beyond TUNE_TOL. */
+  detune: number | null;
 }
 
 function judgePm(n: PmNote, checks: Map<PmNote, PitchCheck>): PmVerdict {
@@ -1618,7 +1622,9 @@ function judgePm(n: PmNote, checks: Map<PmNote, PitchCheck>): PmVerdict {
   const pitch = checks.get(n) ?? null;
   const slowAttack = n.attack !== null && n.attack > attLimit();
   const double = n.doubleGap !== null;
-  const v = (state: PmState): PmVerdict => ({ state, pitch, slowAttack, double });
+  const cents = n.f0 === null ? null : noteOf(n.f0).cents;
+  const detune = cents !== null && Math.abs(cents) > TUNE_TOL ? cents : null;
+  const v = (state: PmState): PmVerdict => ({ state, pitch, slowAttack, double, detune });
   if (muted === null) return v("wait");
   if (!muted) return v("open");
   // The pitch is measured 15–60 ms after the attack; until then the note is still pending.
@@ -1632,9 +1638,13 @@ const attackIssues = (n: PmNote, v: PmVerdict) => {
   const out: string[] = [];
   if (v.double) out.push(`Двойная атака: медиатор ударил по струне дважды с разницей ${Math.round(n.doubleGap! * 1000)} мс. Бейте одним уверенным движением, не цепляйте струну.`);
   if (v.slowAttack) out.push(`Атака ${fmtAtt(n.attack)} — дольше ${settings.attLimMs} мс: медиатор задерживается на струне. Меньше погружайте медиатор и не дожимайте струну перед ударом.`);
+  if (v.detune !== null)
+    out.push(`Нота ${fmtNote(n)} — дальше ${TUNE_TOL} центов от строя: подстройте струну, а если открытая струна строит — не давите на неё ладонью.`);
   return out;
 };
 const cleanAttack = (v: PmVerdict) => !v.double && !v.slowAttack;
+/** No problem of any kind besides the mute itself. */
+const clean = (v: PmVerdict) => cleanAttack(v) && v.detune === null;
 
 const STATE_TITLE: Record<PmState, string> = {
   wait: "Измеряю…",
@@ -1676,7 +1686,7 @@ function drawPmMarks(
     const x = xOf(t);
     const v = judgePm(n, checks);
     const c =
-      v.state === "wait" ? col.text : v.state === "open" ? col.clip : v.state === "pm" && cleanAttack(v) ? col.play : col.warn;
+      v.state === "wait" ? col.text : v.state === "open" ? col.clip : v.state === "pm" && clean(v) ? col.play : col.warn;
     const x20 = n.t20 === null ? null : xOf(t + n.t20);
     if (x20 !== null && x20 < 0) continue;
     if (n.touchAt !== null && n.soundAt !== null && n.soundAt > n.touchAt) {
@@ -1714,7 +1724,7 @@ function drawPmMarks(
       g.globalAlpha = 1;
       g.fillRect(Math.round(x20), y - 4 * dpr, dpr, 11 * dpr);
     }
-    let label = `${STATE_SHORT[v.state]} ${fmtNote(n)} ${fmtT20(n)}`;
+    let label = `${STATE_SHORT[v.state]} ${fmtNote(n)}${v.detune !== null && v.state !== "wait" ? "!" : ""} ${fmtT20(n)}`;
     if (v.pitch && v.state !== "wait") label += ` стр.${fmtCents(v.pitch.cents)}`;
     if (v.double) label += " ×2";
     if (n.attack !== null) label += ` ат.${Math.round(n.attack * 1000)}${v.slowAttack ? "!" : ""}`;
@@ -1738,14 +1748,14 @@ function renderPm() {
   const last = notes.at(-1);
   const box = $("pm-verdict");
   const v = last ? judgePm(last, checks) : null;
-  const allGood = !!v && v.state === "pm" && cleanAttack(v);
+  const allGood = !!v && v.state === "pm" && clean(v);
   box.dataset.state = !v || v.state === "wait" ? "none" : allGood ? "pm" : v.state === "open" ? "open" : "warn";
   $("pm-badge").textContent = !v ? "—" : v.state === "wait" ? "…" : allGood ? "PM" : v.state === "open" ? "✕" : "!";
   let title = !v
     ? recording ? "Сыграйте ноту" : `Нажмите ● и сыграйте ${pitchEx() ? "открытую струну" : "ноту"}`
     : v.state === "pm" && !pitchEx() ? "Palm mute" : STATE_TITLE[v.state];
   if (v && v.state !== "wait") {
-    const extra = [v.double ? "двойная атака" : "", v.slowAttack ? "долгая атака" : ""].filter(Boolean);
+    const extra = [v.double ? "двойная атака" : "", v.slowAttack ? "долгая атака" : "", v.detune !== null ? "нота не строит" : ""].filter(Boolean);
     if (extra.length) title += ` · ${extra.join(", ")}`;
   }
   $("pm-v-title").textContent = title;
@@ -1786,7 +1796,7 @@ function renderPm() {
       .reverse()
       .map(([n, j]) => {
         const b = document.createElement("button");
-        b.className = `pm-note ${j.state === "pm" && !cleanAttack(j) ? "warn" : stateClass(j.state)}`;
+        b.className = `pm-note ${j.state === "pm" && !clean(j) ? "warn" : stateClass(j.state)}`;
         // Where this note sits on the timeline: the first clip of the take that contains it.
         const clip = tl?.clips.find((c) => c.take === take && n.start >= c.from && n.start < c.to);
         const t = clip ? (clip.pos + n.start - clip.from) / sr : n.start / sr;
@@ -1797,7 +1807,8 @@ function renderPm() {
           `<b>${j.state === "wait" ? "…" : STATE_SHORT[j.state] === "PM" ? "Palm mute" : STATE_SHORT[j.state] === "откр." ? "Открытая" : STATE_SHORT[j.state]}</b>` +
           `<span>${m}:${(t - m * 60).toFixed(2).padStart(5, "0")} · ${fmtT20(n)}</span>` +
           `<span>${pitch}атака ${fmtAtt(n.attack)}${j.slowAttack ? " !" : ""}</span>` +
-          (j.double ? `<span class="pm-bad">двойная атака, ${Math.round(n.doubleGap! * 1000)} мс</span>` : "");
+          (j.double ? `<span class="pm-bad">двойная атака, ${Math.round(n.doubleGap! * 1000)} мс</span>` : "") +
+          (j.detune !== null && j.state !== "wait" ? `<span class="pm-bad">не строит, ${fmtCents(j.detune)}</span>` : "");
         b.disabled = !clip;
         b.addEventListener("click", () => {
           follow = false;

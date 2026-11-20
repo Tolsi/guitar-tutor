@@ -50,6 +50,8 @@ const PITCH_N = 4096;
 const REFINE_DELAY_S = 0.06;
 /** A long note's pitch is measured again from this far after the peak. */
 const LATE_PITCH_S = 0.25;
+/** Refinement range around the first estimate, cents: a hard pick on a low string reads up to ~60 sharp at first. */
+const REFINE_C = 100;
 /** Spectral-flux onsets: FFT size, compared frame lag (hops), bins up to this frequency. */
 const FLUX_N = 1024;
 const FLUX_LAG = 2;
@@ -870,12 +872,12 @@ export class PmAnalyzer {
     };
     const scan = (k: number) => {
       let bf = 0, bm = -1;
-      for (let c = -60; c <= 60; c++) {
+      for (let c = -REFINE_C; c <= REFINE_C; c++) {
         const f = k * n.f0! * 2 ** (c / 1200);
         const m = mag(f);
         if (m > bm) (bm = m), (bf = f);
       }
-      return { f: bf / k, m: bm, edge: Math.abs(bf / (k * n.f0!) - 1) > 0.034 };
+      return { f: bf / k, m: bm, edge: Math.abs(1200 * Math.log2(bf / (k * n.f0!))) >= REFINE_C - 1 };
     };
     // The fundamental, unless it is buried (well below the 2nd harmonic): then the 2nd harmonic.
     let r = scan(1);
