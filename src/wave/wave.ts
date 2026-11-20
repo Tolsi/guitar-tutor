@@ -7,7 +7,6 @@ import { Timeline, clipEnd, encodeWav, type Clip, type Take } from "./timeline";
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 
-const MAX_SECONDS = 300;
 const SETTINGS_KEY = "wave-settings";
 
 type GridDiv = "off" | "1" | "4" | "8" | "16";
@@ -240,25 +239,10 @@ function setInGain(db: number) {
  * guitar beside it is what the exercise analysis listens to (distortion flattens attacks and pitch).
  */
 function onTapBlock(wet: Float32Array, dry: Float32Array) {
-  if (!recording || !rec || !tl) return;
-  const st = rec.take.store;
-  const room = st.maxLength - st.length;
-  st.push(wet);
+  if (!recording || !rec) return;
+  rec.take.store.push(wet);
   rec.take.dry?.push(dry);
-  rec.clip.to = st.length;
-  if (st.full) {
-    // A take holds MAX_SECONDS; the recording goes on seamlessly in the next take, right after it.
-    const pos = clipEnd(rec.clip);
-    const lane = tl.freeLane(pos, MAX_SECONDS * sr, rec.clip.lane);
-    const take = tl.newTake(`Дубль ${tl.takeCount + 1}`, new SampleStore(MAX_SECONDS * sr), new SampleStore(MAX_SECONDS * sr));
-    rec = { take, clip: tl.addClip(take, 0, 0, pos, lane) };
-    if (selClip) selClip = rec.clip;
-    if (room < wet.length) {
-      take.store.push(wet.subarray(room));
-      take.dry?.push(dry.subarray(room));
-      rec.clip.to = take.store.length;
-    }
-  }
+  rec.clip.to = rec.take.store.length;
 }
 
 function routeTap(from: AudioNode) {
@@ -501,10 +485,11 @@ function setRecording(on: boolean) {
   if (on) {
     if (!ctx || !tl || !node) return;
     stopPlay();
-    // A new take starts at the marker (or the end); over existing audio it goes on a free lane.
+    // A new take starts at the marker (or the end); over existing audio it goes on a free lane, one with
+    // nothing after the marker, since the take may grow without limit.
     const pos = marker !== null ? Math.min(Math.round(marker * sr), tl.length) : tl.length;
-    const lane = tl.freeLane(pos, MAX_SECONDS * sr);
-    const take = tl.newTake(`Дубль ${tl.takeCount + 1}`, new SampleStore(MAX_SECONDS * sr), new SampleStore(MAX_SECONDS * sr));
+    const lane = tl.freeLane(pos, Infinity);
+    const take = tl.newTake(`Дубль ${tl.takeCount + 1}`, new SampleStore(), new SampleStore());
     tl.checkpoint();
     rec = { take, clip: tl.addClip(take, 0, 0, pos, lane) };
     selClip = rec.clip;
@@ -692,13 +677,13 @@ async function importFile(f: File) {
     const c = await ensureCtx();
     status(`Читаю «${f.name}»…`);
     const audio = await c.decodeAudioData(await f.arrayBuffer());
-    const len = Math.min(audio.length, MAX_SECONDS * sr);
+    const len = audio.length;
     const mono = new Float32Array(len);
     for (let ch = 0; ch < audio.numberOfChannels; ch++) {
       const d = audio.getChannelData(ch);
       for (let i = 0; i < len; i++) mono[i] += d[i] / audio.numberOfChannels;
     }
-    const store = new SampleStore(len);
+    const store = new SampleStore();
     store.push(mono);
     const t = tl!;
     const take = t.newTake(f.name.replace(/\.[^.]+$/, ""), store);

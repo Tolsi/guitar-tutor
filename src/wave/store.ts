@@ -11,16 +11,6 @@ export class SampleStore {
   pmin = new Float32Array(4096);
   pmax = new Float32Array(4096);
 
-  readonly maxLength: number;
-
-  constructor(maxLength: number) {
-    this.maxLength = maxLength;
-  }
-
-  get full() {
-    return this.length >= this.maxLength;
-  }
-
   clear() {
     this.length = 0;
     this.chunks = [];
@@ -34,7 +24,7 @@ export class SampleStore {
   }
 
   push(data: Float32Array) {
-    for (let i = 0; i < data.length && this.length < this.maxLength; i++) {
+    for (let i = 0; i < data.length; i++) {
       const idx = this.length++;
       const c = idx >> CHUNK_BITS;
       if (c === this.chunks.length) this.chunks.push(new Float32Array(CHUNK));
