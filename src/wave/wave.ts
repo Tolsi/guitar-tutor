@@ -19,8 +19,9 @@ interface Settings {
   /** Headphone monitoring through the amp; also used for playback. */
   monOn: boolean;
   exercise: "free" | "pm" | "pmopen" | "legato";
-  /** What the timeline shows: the waveform, or the pitch of the notes. */
-  view: "wave" | "pitch";
+  /** What the timeline shows: the waveform, the pitch of the notes, or both (never neither). */
+  showWave: boolean;
+  showPitch: boolean;
   lgStrict: Strictness;
   pmLimMs: number;
   attLimMs: number;
@@ -47,7 +48,8 @@ function loadSettings(): Settings {
     channel: "auto",
     monOn: true,
     exercise: "free",
-    view: "wave",
+    showWave: true,
+    showPitch: false,
     lgStrict: "normal",
     pmLimMs: 350,
     attLimMs: 70,
@@ -67,6 +69,9 @@ function loadSettings(): Settings {
     const d = def();
     // Rev 2: real recordings put a clean pick attack at 30–55 ms, so the old 40 ms default flagged most notes.
     if ((saved.rev ?? 1) < 2 && saved.attLimMs === 40) delete saved.attLimMs;
+    // The two views used to exclude each other.
+    if (saved.view === "pitch" && saved.showPitch === undefined) Object.assign(saved, { showWave: false, showPitch: true });
+    delete saved.view;
     return { ...d, ...saved, rev: 2, mon: { ...d.mon, ...(saved.mon ?? {}) } };
   } catch {
     return def();
@@ -831,10 +836,10 @@ function drawWave() {
       if (x1 < 0 || x0 > W) continue;
       drawClip(g, c, x0, x1, top + c.lane * laneH, laneH, W, dpr);
       if (pitchView()) drawPitch(g, W, top + c.lane * laneH, laneH, dpr, xOf, c);
-      else if (pmEx()) {
+      if (settings.showWave && pmEx()) {
         let ch = checks.get(c.take);
         if (!ch) checks.set(c.take, (ch = pitchChecks(c.take.pm.notes)));
-        drawPmMarks(g, W, top + c.lane * laneH, laneH, dpr, xOf, c, ch);
+        drawPmMarks(g, W, top + c.lane * laneH, waveH(laneH), dpr, xOf, c, ch);
       }
     }
   } else {
@@ -890,7 +895,8 @@ function drawClip(g: CanvasRenderingContext2D, c: Clip, x0: number, x1: number, 
     g.textBaseline = "middle";
     g.restore();
   }
-  if (pitchView()) return;
+  if (!settings.showWave) return;
+  h = waveH(h);
   const mid = y0 + head / 2 + h / 2;
   const amp = ((h - head) / 2 - 4 * dpr) * gain;
   const yTop = y0 + pad + head, yBot = y0 + h - pad;
@@ -1319,16 +1325,19 @@ $("vw-auto").addEventListener("click", () => {
   saveSettings();
   renderViewMenu();
 });
-function setView(v: Settings["view"]) {
-  settings.view = v;
+function toggleView(v: "wave" | "pitch") {
+  const key = v === "wave" ? "showWave" : "showPitch";
+  settings[key] = !settings[key];
+  // Something must stay on screen: turning off the only view switches to the other one.
+  if (!settings.showWave && !settings.showPitch) settings[v === "wave" ? "showPitch" : "showWave"] = true;
   saveSettings();
   renderViewMenu();
 }
 for (const el of document.querySelectorAll<HTMLElement>("[data-view]"))
-  el.addEventListener("click", () => setView(el.dataset.view as Settings["view"]));
+  el.addEventListener("click", () => toggleView(el.dataset.view as "wave" | "pitch"));
 function renderViewMenu() {
   for (const el of document.querySelectorAll<HTMLElement>("[data-view]"))
-    el.setAttribute("aria-checked", String(el.dataset.view === settings.view));
+    el.setAttribute("aria-checked", String(el.dataset.view === "wave" ? settings.showWave : settings.showPitch));
   $("vw-auto").setAttribute("aria-checked", String(settings.autoGain));
 }
 renderViewMenu();
@@ -1872,7 +1881,10 @@ function applyExercise() {
 
 // ---------- note pitch view and legato exercise ----------
 
-const pitchView = () => settings.view === "pitch";
+const pitchView = () => settings.showPitch;
+/** With both views on, the wave takes this share of a lane, above the pitch. */
+const WAVE_SHARE = 0.42;
+const waveH = (laneH: number) => (!settings.showWave ? 0 : pitchView() ? Math.round(laneH * WAVE_SHARE) : laneH);
 const lgEx = () => settings.exercise === "legato";
 let wlKey = "";
 /** MIDI range of the pitch view; follows the notes on screen. */
@@ -1913,7 +1925,7 @@ function fitPitch() {
 const lgColor = (n: Note) => (n.eval ? (n.eval.clean ? col.play : col.warn) : col.text);
 
 function drawPitch(g: CanvasRenderingContext2D, W: number, y0: number, h: number, dpr: number, xOf: (t: number) => number, c: Clip) {
-  const top = y0 + (h > 46 * dpr ? 16 * dpr : 2 * dpr);
+  const top = y0 + Math.max(waveH(h), h > 46 * dpr ? 16 * dpr : 2 * dpr);
   const bottom = y0 + h - 2 * dpr;
   const shift = (c.pos - c.from) / sr;
   const x0 = Math.max(0, xOf(c.pos / sr)), x1 = Math.min(W, xOf(clipEnd(c) / sr));
@@ -1924,6 +1936,10 @@ function drawPitch(g: CanvasRenderingContext2D, W: number, y0: number, h: number
   g.beginPath();
   g.rect(x0, top, x1 - x0, bottom - top);
   g.clip();
+  if (settings.showWave) {
+    g.fillStyle = col.axis;
+    g.fillRect(x0, top, x1 - x0, dpr);
+  }
   g.font = `${10 * dpr}px "IBM Plex Mono", ui-monospace, monospace`;
   g.textBaseline = "middle";
   for (let m = Math.ceil(pLo); m <= pHi; m++) {
@@ -2122,10 +2138,10 @@ function pmTone() {
 }
 
 function setExercise(ex: Settings["exercise"]) {
-  // The legato exercise is about pitch; leaving it brings the waveform back.
-  if (ex === "legato") settings.view = "pitch";
-  else if (settings.exercise === "legato") settings.view = "wave";
   settings.exercise = ex;
+  // Each exercise marks its notes in a view of its own: make sure it is on.
+  if (lgEx()) settings.showPitch = true;
+  if (pmEx()) settings.showWave = true;
   if (pmEx()) pmTone();
   renderViewMenu();
   saveSettings();
