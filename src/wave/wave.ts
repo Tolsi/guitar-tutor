@@ -919,9 +919,10 @@ function drawClip(g: CanvasRenderingContext2D, c: Clip, x0: number, x1: number, 
   const mid = y0 + head / 2 + h / 2;
   const amp = ((h - head) / 2 - 4 * dpr) * gain;
   const yTop = y0 + pad + head, yBot = y0 + h - pad;
-  const yOf = (v: number) => Math.min(yBot, Math.max(yTop, mid - v * amp));
+  const yOf = (v: number) => Math.min(yBot, Math.max(yTop, mid - (v - wCenter()) * amp));
   g.fillStyle = col.grid;
-  g.fillRect(Math.max(0, x0), Math.round(mid), Math.min(W, x1) - Math.max(0, x0), dpr);
+  const zero = mid + wCenter() * amp;
+  if (zero >= yTop && zero <= yBot) g.fillRect(Math.max(0, x0), Math.round(zero), Math.min(W, x1) - Math.max(0, x0), dpr);
 
   const spp = (viewSpan * sr) / W;
   const s0 = viewStart * sr;
@@ -937,6 +938,7 @@ function drawClip(g: CanvasRenderingContext2D, c: Clip, x0: number, x1: number, 
       if (mn > mx) continue;
       g.fillStyle = mx >= 0.995 || mn <= -0.995 ? col.clip : col.wave;
       const y1 = yOf(mx), y2 = yOf(mn);
+      if (y1 === y2 && (y1 === yTop || y1 === yBot) && mx > mn) continue; // all of it outside the magnified part
       g.fillRect(px, y1, 1, Math.max(dpr, y2 - y1));
     }
   } else {
@@ -1104,7 +1106,7 @@ wave.addEventListener(
       const zoom = Math.exp(-(dy || dx) * 0.003);
       const at = pitchAt(e.clientY - rect.top, rect.height);
       if (at !== null) {
-        zoomPitch(zoom, at);
+        zoomPitch(zoom, at, viewStart + x * viewSpan, locate(e.clientX - rect.left, e.clientY - rect.top).lane);
         return;
       }
       settings.autoGain = false;
@@ -1115,6 +1117,11 @@ wave.addEventListener(
       e.preventDefault();
       const d = Math.abs(dx) > Math.abs(dy) ? dx : dy;
       panBy((d / rect.width) * viewSpan);
+    } else if (waveAt(e.clientY - rect.top, rect.height)) {
+      if (panWave(-dy / waveAmpPx(rect.height))) e.preventDefault();
+    } else if (pManual && pitchAt(e.clientY - rect.top, rect.height) !== null) {
+      // At the end of the range the page scrolls on.
+      if (panPitch((-dy / pitchPx(rect.height)) * (pHi - pLo))) e.preventDefault();
     }
   },
   { passive: false },
@@ -1128,7 +1135,7 @@ function panBy(dt: number) {
 }
 
 type Drag =
-  | { mode: "pan"; x: number; start: number; moved: boolean }
+  | { mode: "pan"; x: number; y: number; start: number; pitch: boolean; wave: boolean; moved: boolean }
   | { mode: "select"; x: number; anchor: number; moved: boolean }
   | { mode: "clip"; x: number; y: number; clip: Clip; grab: number; copy: boolean; moved: boolean };
 let drag: Drag | null = null;
@@ -1139,7 +1146,7 @@ wave.addEventListener("pointerdown", (e) => {
   wave.setPointerCapture(e.pointerId);
   if (e.button === 1) {
     e.preventDefault();
-    drag = { mode: "pan", x: e.clientX, start: viewStart, moved: false };
+    drag = { mode: "pan", x: e.clientX, y: e.clientY, start: viewStart, pitch: pManual && pitchAt(py, rect.height) !== null, wave: waveAt(py, rect.height), moved: false };
     wave.classList.add("dragging");
     return;
   }
@@ -1158,12 +1165,20 @@ wave.addEventListener("pointermove", (e) => {
   const px = e.clientX - rect.left, py = e.clientY - rect.top;
   hover = { x: px, y: py };
   if (!drag) return;
-  if (!drag.moved && Math.abs(e.clientX - drag.x) + (drag.mode === "clip" ? Math.abs(e.clientY - drag.y) : 0) <= 3) return;
+  if (!drag.moved && Math.abs(e.clientX - drag.x) + (drag.mode === "select" ? 0 : Math.abs(e.clientY - drag.y)) <= 3) return;
   const first = !drag.moved;
   drag.moved = true;
   const { t, lane } = locate(px, py);
   if (drag.mode === "pan") {
-    follow = false;
+    if (drag.wave) {
+      panWave((e.clientY - drag.y) / waveAmpPx(rect.height));
+      drag.y = e.clientY;
+    }
+    if (drag.pitch) {
+      panPitch(((e.clientY - drag.y) / pitchPx(rect.height)) * (pHi - pLo));
+      drag.y = e.clientY;
+    }
+    if (Math.abs(e.clientX - drag.x) > 3) follow = false;
     viewStart = drag.start + ((drag.x - e.clientX) / rect.width) * viewSpan;
     clampView();
   } else if (drag.mode === "select") {
@@ -1376,6 +1391,7 @@ $("vw-zout").addEventListener("click", () => zoomBy(2));
 $("vw-gain").addEventListener("click", () => {
   gain = 1;
   pManual = false;
+  wPan = 0;
   settings.autoGain = false;
   saveSettings();
   renderViewMenu();
@@ -1960,7 +1976,7 @@ let pLo = 45, pHi = 59;
 const P_MIN_SPAN = 8;
 /** Zoomed by hand: the range stays put. Zooming all the way out returns it to following the notes. */
 let pManual = false;
-let pAutoSpan = 14;
+let pAutoLo = 45, pAutoHi = 59;
 /** Closest zoom, semitones from bottom to top. */
 const P_ZOOM_MIN = 0.4;
 
@@ -1974,17 +1990,94 @@ function pitchAt(y: number, height: number): number | null {
   return inLane < top || inLane > bottom ? null : (bottom - inLane) / (bottom - top);
 }
 
-/** Magnifies the pitch view around the height `at`. */
-function zoomPitch(factor: number, at: number) {
-  const span = pHi - pLo;
-  const want = Math.max(P_ZOOM_MIN, span / factor);
-  pManual = want < pAutoSpan;
-  if (!pManual) return;
-  const m = pLo + at * span;
-  pLo = m - at * want;
-  pHi = pLo + want;
+/** Amplitude at the middle of the wave when it is magnified beyond its height; 0 is silence. */
+let wPan = 0;
+const wPanMax = () => Math.max(0, loudestPeak() - 0.85 / gain);
+const wCenter = () => {
+  if (settings.autoGain) return (wPan = 0);
+  const max = wPanMax();
+  return (wPan = Math.max(-max, Math.min(max, wPan)));
+};
+/** Moves the magnified wave; false when there is nothing further to show. */
+function panWave(v: number) {
+  const before = wCenter();
+  wPan += v;
+  return Math.abs(wCenter() - before) > 1e-6;
+}
+/** Whether canvas height `y` (CSS px) is over a wave. */
+function waveAt(y: number, height: number) {
+  if (!settings.showWave || y < RULER) return false;
+  const laneH = (height - RULER) / laneCount();
+  return (y - RULER) % laneH < waveH(laneH - loudH(laneH));
+}
+/** CSS px a full-scale amplitude takes. */
+function waveAmpPx(height: number) {
+  const laneH = (height - RULER) / laneCount();
+  const h = waveH(laneH - loudH(laneH));
+  return Math.max(1, ((h - (laneH > 46 ? 14 : 0)) / 2 - 4) * gain);
 }
 
+/** Height of the pitch view in a lane, CSS px. */
+function pitchPx(height: number) {
+  const laneH = (height - RULER) / laneCount();
+  const main = laneH - loudH(laneH);
+  return Math.max(1, main - 2 - Math.max(waveH(main), main > 46 ? 16 : 2));
+}
+
+/** Moves the magnified range by `semitones` within the notes' range; false when it is already at the end. */
+function panPitch(semitones: number) {
+  const span = pHi - pLo;
+  const lo = Math.min(Math.max(pLo + semitones, pAutoLo), Math.max(pAutoLo, pAutoHi - span));
+  const moved = Math.abs(lo - pLo) > 1e-6;
+  pLo = lo;
+  pHi = lo + span;
+  return moved;
+}
+
+const soundingPitch = (n: Note) => n.midi + (n.eval?.center ?? n.points.at(-1)?.cents ?? 0) / 100;
+
+/** The note nearest to timeline time `t`, at most `within` seconds away, in the given lane (any if null). */
+function noteNear(t: number, lane: number | null, within: number): Note | null {
+  let best: Note | null = null, bestD = within;
+  for (const c of tl?.clips ?? []) {
+    if (lane !== null && c.lane !== lane) continue;
+    const shift = (c.pos - c.from) / sr;
+    const lg = c.take.lg;
+    for (const n of clipNotes(c, lg.current ? [...lg.notes, lg.current] : lg.notes)) {
+      const a = n.start + shift, b = n.end + shift;
+      const d = t < a ? a - t : t > b ? t - b : 0;
+      if (d <= bestD) (best = n), (bestD = d);
+    }
+  }
+  return best;
+}
+
+/** Magnifies the pitch view around the note nearest in time to the cursor, so it never leaves the screen. */
+function zoomPitch(factor: number, at: number, t: number, lane: number) {
+  const span = pHi - pLo;
+  const want = Math.max(P_ZOOM_MIN, span / factor);
+  pManual = want < pAutoHi - pAutoLo;
+  if (!pManual) return;
+  const n = noteNear(t, lane, viewSpan);
+  const m = n ? soundingPitch(n) : pLo + at * span;
+  const place = Math.min(0.75, Math.max(0.25, (m - pLo) / span));
+  pLo = m - place * want;
+  pHi = pLo + want;
+  panPitch(0);
+}
+
+/** While recording or playing, the magnified range glides after the note that sounds. */
+function followPitch() {
+  const t = recording ? head() : playPos();
+  if (t === null || drag) return;
+  const n = noteNear(t, null, recording ? 1 : 0.05);
+  if (!n) return;
+  const m = soundingPitch(n), span = pHi - pLo;
+  if (m >= pLo + span * 0.15 && m <= pHi - span * 0.15) return;
+  const d = (m - (pLo + pHi) / 2) * 0.2;
+  pLo += d;
+  pHi += d;
+}
 
 /** First index in sorted `a` at or after `v`. */
 function lowerBound(a: number[], v: number) {
@@ -2013,8 +2106,12 @@ function fitPitch() {
   }
   if (hi < lo) return;
   const extra = Math.max(0, P_MIN_SPAN - (hi - lo + 2)) / 2;
-  pAutoSpan = hi - lo + 2 + 2 * extra;
-  if (pManual) return;
+  pAutoLo = lo - 1 - extra;
+  pAutoHi = hi + 1 + extra;
+  if (pManual) {
+    followPitch();
+    return;
+  }
   pLo += (lo - 1 - extra - pLo) * 0.2;
   pHi += (hi + 1 + extra - pHi) * 0.2;
 }
@@ -2111,10 +2208,14 @@ function drawPitch(g: CanvasRenderingContext2D, W: number, y0: number, h: number
     g.stroke();
     const name = noteName(n.midi);
     const full = ev ? `${name} ${fmtCents(ev.center)}${ev.clean ? "" : ` ${ev.issues.map((i) => ISSUE_LABEL[i.kind]).join(", ")}`}` : name;
-    const label = [full, name].find((s) => g.measureText(s).width + 6 * dpr < Math.max(nx1 - nx0, 24 * dpr));
+    // Out of the magnified range: an arrow to where it is.
+    const off = n.midi + 0.5 < pLo ? "↓" : n.midi - 0.5 > pHi ? "↑" : "";
+    const label = off
+      ? off + name
+      : [full, name].find((s) => g.measureText(s).width + 6 * dpr < Math.max(nx1 - nx0, 24 * dpr));
     if (label) {
       const peak = Math.max(...n.points.map((p) => p.cents));
-      const ly = Math.max(top + 7 * dpr, Y(n.midi + Math.max(peak, 0) / 100) - 10 * dpr);
+      const ly = Math.min(bottom - 8 * dpr, Math.max(top + 7 * dpr, Y(n.midi + Math.max(peak, 0) / 100) - 10 * dpr));
       g.fillStyle = col.stage;
       g.globalAlpha = 0.8;
       g.fillRect(nx0 + 2 * dpr, ly - 7 * dpr, g.measureText(label).width + 4 * dpr, 14 * dpr);
