@@ -71,6 +71,8 @@ export interface Note {
 export interface TrackerOpts {
   a4: number;
   gateDb: number;
+  /** Set the gate from the input's own noise instead of gateDb. */
+  autoGate: boolean;
   minClarity: number;
 }
 
@@ -110,6 +112,15 @@ const SWITCH_SEMITONES = 0.75;
 const SWITCH_FRAMES = 3;
 const SILENCE_FRAMES = 4;
 const PICK_RISE_DB = 5;
+// The automatic gate: this far above the noise floor, within these bounds. The upper one keeps long
+// playing without pauses (the floor creeps up under it) from closing the gate on the player.
+const GATE_MARGIN_DB = 10;
+const GATE_MIN_DB = -75;
+const GATE_MAX_DB = -50;
+const FLOOR_RISE_DB_S = 1;
+// Under an open gate, what is this far below the recent playing is a leftover, not a note.
+const RANGE_DB = 35;
+const LOUD_FALL_DB_S = 8;
 
 export function evaluate(note: Note, L: Limits): NoteEval | null {
   if (note.end - note.start < MIN_NOTE) return null;
@@ -164,6 +175,9 @@ export class NoteTracker {
   current: Note | null = null;
   private pending: { t: number; midi: number; db: number }[] = [];
   private silent = 0;
+  private floorDb: number | null = null;
+  private loudDb = -Infinity;
+  private lastT: number | null = null;
   private nextId = 1;
 
   opts: TrackerOpts;
@@ -172,6 +186,30 @@ export class NoteTracker {
   constructor(opts: TrackerOpts, limits: Limits) {
     this.opts = opts;
     this.limits = limits;
+  }
+
+  /** Forgets the level of the input (another device, another channel). */
+  resetLevels() {
+    this.floorDb = null;
+    this.loudDb = -Infinity;
+    this.lastT = null;
+  }
+
+  /** The level a frame must reach to be heard, dB. */
+  get gateDb() {
+    if (!this.opts.autoGate) return this.opts.gateDb;
+    if (this.floorDb === null) return GATE_MAX_DB;
+    const g = Math.min(GATE_MAX_DB, Math.max(GATE_MIN_DB, this.floorDb + GATE_MARGIN_DB));
+    return Math.max(g, this.loudDb - RANGE_DB);
+  }
+
+  private trackLevels(fr: PitchFrame) {
+    const dt = this.lastT === null ? 0 : Math.max(0, fr.t - this.lastT);
+    this.lastT = fr.t;
+    this.loudDb = Math.max(fr.db, this.loudDb - LOUD_FALL_DB_S * dt);
+    if (fr.db < -110) return; // digital silence says nothing about the noise
+    if (this.floorDb === null) this.floorDb = fr.db;
+    else this.floorDb += fr.db < this.floorDb ? 0.2 * (fr.db - this.floorDb) : Math.min(fr.db - this.floorDb, FLOOR_RISE_DB_S * dt);
   }
 
   midiOf(f: number) {
@@ -191,7 +229,8 @@ export class NoteTracker {
 
   /** Returns the note that just ended, if any. */
   push(fr: PitchFrame): Note | null {
-    const voiced = fr.f0 !== null && fr.clarity >= this.opts.minClarity && fr.db >= this.opts.gateDb;
+    this.trackLevels(fr);
+    const voiced = fr.f0 !== null && fr.clarity >= this.opts.minClarity && fr.db >= this.gateDb;
     if (!voiced) {
       this.pending = [];
       if (this.current && ++this.silent >= SILENCE_FRAMES) return this.finish();

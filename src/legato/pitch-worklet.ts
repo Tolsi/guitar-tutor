@@ -29,10 +29,24 @@ class YinPitch extends AudioWorkletProcessor {
   private sinceHop = 0;
   private acc = 0;
   private accN = 0;
+  private power = [0, 0];
+  private sel = 0;
 
   process(inputs: Float32Array[][]) {
-    const ch = inputs[0]?.[0];
-    if (!ch) return true;
+    const inp = inputs[0];
+    if (!inp?.length) return true;
+    // Interfaces often carry the guitar on one channel only, and mixing to mono would lose 6 dB: take the
+    // louder channel, switching on a clear (6 dB) difference only.
+    const a = 1 - Math.exp(-inp[0].length / (sampleRate * 0.3));
+    for (let c = 0; c < Math.min(2, inp.length); c++) {
+      let ss = 0;
+      for (const v of inp[c]) ss += v * v;
+      this.power[c] += a * (ss / inp[c].length - this.power[c]);
+    }
+    const other = 1 - this.sel;
+    if (inp.length === 1) this.sel = 0;
+    else if (this.power[other] > 4 * this.power[this.sel] + 1e-12) this.sel = other;
+    const ch = inp[this.sel];
     for (let i = 0; i < ch.length; i++) {
       this.acc += ch[i];
       if (++this.accN < DECIM) continue;

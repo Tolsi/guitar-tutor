@@ -17,14 +17,18 @@ const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getEleme
 interface Settings {
   deviceId: string;
   gateDb: number;
+  autoGate: boolean;
   strict: Strictness;
   a4: number;
 }
 const SETTINGS_KEY = "legato-settings";
 function loadSettings(): Settings {
-  const def: Settings = { deviceId: "", gateDb: -50, strict: "normal", a4: 440 };
+  const def: Settings = { deviceId: "", gateDb: -50, autoGate: true, strict: "normal", a4: 440 };
   try {
-    return { ...def, ...JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? "{}") };
+    const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? "{}");
+    // A gate raised by hand before the automatic one existed is there against a noisy input: keep it.
+    if (saved.autoGate === undefined && saved.gateDb > def.gateDb) saved.autoGate = false;
+    return { ...def, ...saved };
   } catch {
     return def;
   }
@@ -38,7 +42,7 @@ function saveSettings() {
 }
 
 const settings = loadSettings();
-const tracker = new NoteTracker({ a4: settings.a4, gateDb: settings.gateDb, minClarity: 0.8 }, LIMITS[settings.strict]);
+const tracker = new NoteTracker({ a4: settings.a4, gateDb: settings.gateDb, autoGate: settings.autoGate, minClarity: 0.8 }, LIMITS[settings.strict]);
 const frames: PitchFrame[] = [];
 const TRACE_SPAN = 6;
 
@@ -92,6 +96,8 @@ async function openInput() {
         echoCancellation: false,
         noiseSuppression: false,
         autoGainControl: false,
+        // Both channels: the worklet picks the one with the guitar.
+        channelCount: { ideal: 2 },
       },
     });
     if (!ctx) {
@@ -103,15 +109,16 @@ async function openInput() {
     node = new AudioWorkletNode(ctx, "yin-pitch", {
       numberOfInputs: 1,
       numberOfOutputs: 1,
-      channelCount: 1,
-      channelCountMode: "explicit",
-      channelInterpretation: "speakers",
+      outputChannelCount: [1],
+      channelCount: 2,
+      channelCountMode: "max",
     });
     node.port.onmessage = (e: MessageEvent<PitchFrame>) => onFrame(e.data);
     const mute = ctx.createGain();
     mute.gain.value = 0;
     source.connect(node).connect(mute).connect(ctx.destination);
     running = true;
+    tracker.resetLevels();
 
     const track = stream.getAudioTracks()[0];
     status.textContent = `Вход: ${track.label || "микрофон"}, ${ctx.sampleRate / 1000} кГц`;
@@ -226,8 +233,9 @@ function drawTrace(now: number) {
   }
 
   g.fillStyle = pal.muted;
+  const gate = tracker.gateDb;
   for (const f of frames) {
-    if (f.f0 === null || f.db < tracker.opts.gateDb || f.clarity < 0.8) continue;
+    if (f.f0 === null || f.db < gate || f.clarity < 0.8) continue;
     const m = tracker.midiOf(f.f0);
     g.globalAlpha = 0.35;
     g.fillRect(X(f.t) - 1, Y(m) - 1, 2, 2);
@@ -381,6 +389,7 @@ function renderList() {
 }
 
 function renderTuner(now: number) {
+  showGate();
   const last = frames.at(-1);
   $("lg-level").style.width = last ? `${Math.max(0, Math.min(100, ((last.db + 80) / 70) * 100))}%` : "0%";
   const cur = tracker.current;
@@ -432,12 +441,19 @@ function loop() {
   requestAnimationFrame(loop);
 }
 
+function showGate() {
+  const t = settings.autoGate && !frames.length ? "авто" : `${Math.round(tracker.gateDb)} дБ`;
+  if ($("lg-gate-v").textContent !== t) $("lg-gate-v").textContent = t;
+}
+
 function applySettings() {
+  tracker.opts.autoGate = settings.autoGate;
   tracker.opts.gateDb = settings.gateDb;
   tracker.opts.a4 = settings.a4;
   tracker.limits = LIMITS[settings.strict];
   tracker.reevaluate();
-  $("lg-gate-v").textContent = `${settings.gateDb} дБ`;
+  $<HTMLInputElement>("lg-gate-auto").checked = settings.autoGate;
+  showGate();
   listDirty = true;
   saveSettings();
 }
@@ -445,7 +461,8 @@ function applySettings() {
 $<HTMLInputElement>("lg-gate").value = String(settings.gateDb);
 $<HTMLSelectElement>("lg-strict").value = settings.strict;
 $<HTMLInputElement>("lg-a4").value = String(settings.a4);
-$("lg-gate-v").textContent = `${settings.gateDb} дБ`;
+$<HTMLInputElement>("lg-gate-auto").checked = settings.autoGate;
+showGate();
 
 $("lg-start").addEventListener("click", openInput);
 $("lg-rec").addEventListener("click", toggleRecord);
@@ -463,6 +480,11 @@ $<HTMLSelectElement>("lg-device").addEventListener("change", (e) => {
 });
 $<HTMLInputElement>("lg-gate").addEventListener("input", (e) => {
   settings.gateDb = Number((e.target as HTMLInputElement).value);
+  settings.autoGate = false;
+  applySettings();
+});
+$<HTMLInputElement>("lg-gate-auto").addEventListener("change", (e) => {
+  settings.autoGate = (e.target as HTMLInputElement).checked;
   applySettings();
 });
 $<HTMLSelectElement>("lg-strict").addEventListener("change", (e) => {
