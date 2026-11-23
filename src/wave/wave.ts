@@ -134,6 +134,7 @@ interface Colors {
   text: string;
   play: string;
   warn: string;
+  good: string;
   box: string;
 }
 function readColors(): Colors {
@@ -148,6 +149,7 @@ function readColors(): Colors {
     text: v("--scope-text"),
     play: v("--scope-play"),
     warn: v("--scope-warn"),
+    good: v("--scope-good"),
     box: v("--scope-box"),
   };
 }
@@ -1962,7 +1964,8 @@ function fitPitch() {
   pHi += (hi + 1 + extra - pHi) * 0.2;
 }
 
-const lgColor = (n: Note) => (n.eval ? (n.eval.clean ? col.play : col.warn) : col.text);
+/** As in the legato tab: green for a clean note, red for a faulty one, amber while it sounds. */
+const lgColor = (n: Note) => (n.eval ? (n.eval.clean ? col.good : col.clip) : col.wave);
 
 function drawPitch(g: CanvasRenderingContext2D, W: number, y0: number, h: number, dpr: number, xOf: (t: number) => number, c: Clip) {
   const top = y0 + Math.max(waveH(h), h > 46 * dpr ? 16 * dpr : 2 * dpr);
@@ -2010,11 +2013,16 @@ function drawPitch(g: CanvasRenderingContext2D, W: number, y0: number, h: number
     if (nx1 < 0 || nx0 > W) continue;
     const color = lgColor(n);
     const ev = n.eval;
+    // The note's own row, tinted, so right and wrong are told apart at a glance.
+    g.fillStyle = color;
+    g.globalAlpha = 0.16;
+    g.fillRect(nx0, Y(n.midi + 0.45), Math.max(dpr, nx1 - nx0), Y(n.midi - 0.45) - Y(n.midi + 0.45));
+    g.globalAlpha = 1;
     if (ev) {
       // The judged part, as wide as the pitch may wander.
       const mid = n.midi + ev.center / 100, half = L.spread / 200;
       g.fillStyle = color;
-      g.globalAlpha = 0.18;
+      g.globalAlpha = 0.28;
       g.fillRect(xOf(ev.from + shift), Y(mid + half), xOf(ev.to + shift) - xOf(ev.from + shift), Y(mid - half) - Y(mid + half));
       g.globalAlpha = 1;
     }
@@ -2072,7 +2080,7 @@ function renderWl() {
   const notes = take?.lg.notes ?? [];
   const n = wlNote(take);
   const ev = n?.eval ?? null;
-  $("wl-verdict").dataset.state = !ev ? "none" : ev.clean ? "pm" : "warn";
+  $("wl-verdict").dataset.state = !ev ? "none" : ev.clean ? "pm" : "open";
   $("wl-badge").textContent = !n ? "—" : noteName(n.midi);
   $("wl-v-title").textContent = !n || !ev
     ? recording ? "Сыграйте ноту" : "Нажмите ● и сыграйте легато"
@@ -2100,7 +2108,7 @@ function renderWl() {
       .reverse()
       .map((q) => {
         const b = document.createElement("button");
-        b.className = `pm-note ${q.eval?.clean ? "pm" : "warn"}`;
+        b.className = `pm-note ${q.eval?.clean ? "pm" : "open"}`;
         const clip = tl?.clips.find((c) => c.take === take && q.start * sr < c.to && q.end * sr > c.from);
         const at = Math.max(q.start, clip ? clip.from / sr : 0);
         const t = clip ? (clip.pos - clip.from) / sr + at : q.start;
@@ -2148,7 +2156,7 @@ function drawWlDetail() {
   if (!n?.eval) return;
   const ev = n.eval, half = LIMITS[settings.lgStrict].spread / 2;
   const X = (t: number) => left + ((t - n.start) / Math.max(0.05, n.end - n.start)) * (W - left - 4 * dpr);
-  g.fillStyle = col.play;
+  g.fillStyle = col.good;
   g.globalAlpha = 0.14;
   g.fillRect(X(ev.from), Y(ev.center + half), X(ev.to) - X(ev.from), Y(ev.center - half) - Y(ev.center + half));
   // Attack and release: not judged.
