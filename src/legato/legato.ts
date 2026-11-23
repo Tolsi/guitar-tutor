@@ -287,10 +287,11 @@ function drawDetail() {
 
   g.fillStyle = pal.good;
   g.globalAlpha = 0.12;
-  g.fillRect(X(ev.from), Y(ev.center + L.spread / 2), w - X(ev.from), Y(ev.center - L.spread / 2) - Y(ev.center + L.spread / 2));
+  g.fillRect(X(ev.from), Y(ev.center + L.spread / 2), X(ev.to) - X(ev.from), Y(ev.center - L.spread / 2) - Y(ev.center + L.spread / 2));
   g.globalAlpha = 0.08;
   g.fillStyle = pal.muted;
   g.fillRect(34, 0, X(ev.from) - 34, h);
+  g.fillRect(X(ev.to), 0, w - X(ev.to), h);
   g.globalAlpha = 1;
 
   g.strokeStyle = noteColor(n);
@@ -415,7 +416,7 @@ function renderTuner(now: number) {
   const L = tracker.limits;
   needle.style.backgroundColor = Math.abs(c) <= L.center ? pal.good : pal.warn;
 
-  const tail = cur.points.filter((p) => p.t > cur.start + 0.06).slice(-15).map((p) => p.cents);
+  const tail = cur.points.filter((p) => p.t > cur.start + 0.06).slice(-20, -5).map((p) => p.cents);
   if (tail.length >= 6) {
     const m = tail.reduce((s, v) => s + v, 0) / tail.length;
     const sd = Math.sqrt(tail.reduce((s, v) => s + (v - m) ** 2, 0) / tail.length);

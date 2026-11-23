@@ -53,6 +53,8 @@ export interface NoteEval {
   drift: number;
   /** Start of the analysed part; earlier frames are the attack transient. */
   from: number;
+  /** Last judged moment: after it the note is being released. */
+  to: number;
   issues: Issue[];
   clean: boolean;
 }
@@ -105,7 +107,18 @@ function linearFit(ts: number[], ys: number[]) {
 
 const ATTACK_SKIP = 0.02;
 const ATTACK_WINDOW = 0.12;
-const TAIL_SKIP = 0.025;
+// The finger letting go or damping the string bends the pitch over the last 50–70 ms (measured on real
+// recordings), and that is no part of holding the note. Short notes give up a quarter at most.
+const TAIL_SKIP = 0.06;
+const TAIL_SKIP_MIN = 0.025;
+const TAIL_SHARE = 0.25;
+// A release is also seen as a sudden fall of the level near the end: this much within RELEASE_SPAN.
+const RELEASE_DB = 8;
+const RELEASE_SPAN = 0.05;
+const RELEASE_MAX = 0.2;
+const RELEASE_SHARE = 0.4;
+// Quieter than this under the note's peak, the pitch reading itself gets shaky.
+const BODY_RANGE_DB = 24;
 const MIN_NOTE = 0.08;
 // A pitch more than this far from the current note, held for SWITCH_FRAMES, starts a new note.
 const SWITCH_SEMITONES = 0.75;
@@ -122,10 +135,31 @@ const FLOOR_RISE_DB_S = 1;
 const RANGE_DB = 35;
 const LOUD_FALL_DB_S = 8;
 
+/** Where the held part of the note ends and its release begins. */
+function releaseStart(note: Note): number {
+  const dur = note.end - note.start;
+  let to = note.end - Math.max(TAIL_SKIP_MIN, Math.min(TAIL_SKIP, dur * TAIL_SHARE));
+  const p = note.points;
+  const lo = note.end - Math.min(RELEASE_MAX, dur * RELEASE_SHARE);
+  for (let i = 0, j = 0; i < p.length; i++) {
+    if (p[i].t < lo) continue;
+    while (j < p.length - 1 && p[j].t < p[i].t + RELEASE_SPAN) j++;
+    if (p[j].t <= p[i].t + RELEASE_SPAN * 1.5 && p[i].db - p[j].db >= RELEASE_DB) {
+      to = Math.min(to, p[i].t);
+      break;
+    }
+  }
+  return to;
+}
+
 export function evaluate(note: Note, L: Limits): NoteEval | null {
   if (note.end - note.start < MIN_NOTE) return null;
   const from = note.start + ATTACK_SKIP;
-  const pts = note.points.filter((p) => p.t >= from && p.t <= note.end - TAIL_SKIP && p.db >= note.peakDb - 30);
+  const to = releaseStart(note);
+  const within = (end: number, range: number) => note.points.filter((p) => p.t >= from && p.t <= end && p.db >= note.peakDb - range);
+  let pts = within(to, BODY_RANGE_DB);
+  // A short note with nothing left is judged whole rather than lost.
+  if (pts.length < 5) pts = within(note.end - TAIL_SKIP_MIN, 30);
   if (pts.length < 5) return null;
 
   const early = pts.filter((p) => p.t < note.start + ATTACK_WINDOW);
@@ -167,7 +201,7 @@ export function evaluate(note: Note, L: Limits): NoteEval | null {
   else if (center < -L.center)
     issues.push({ kind: "flat", text: `Нота ниже строя на ${r(center)} ц: проверьте настройку гитары.` });
 
-  return { center, wobble, spread, overshoot, drift, from, issues, clean: issues.length === 0 };
+  return { center, wobble, spread, overshoot, drift, from, to: pts[pts.length - 1].t, issues, clean: issues.length === 0 };
 }
 
 export class NoteTracker {
