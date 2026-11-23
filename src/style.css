@@ -560,3 +560,8 @@ kbd {
 .settings input[type="range"] { width: 100%; }
 .st-row { display: flex; flex-wrap: wrap; gap: 12px 24px; }
 .st-actions { display: flex; justify-content: flex-end; }
+
+/* ---------- file drop ---------- */
+.drop-hint { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; pointer-events: none; border: 4px dashed var(--accent); background: color-mix(in srgb, var(--bg) 35%, transparent); }
+.drop-hint[hidden] { display: none; }
+.drop-hint span { padding: 12px 20px; border-radius: 8px; background: var(--surface); border: 1px solid var(--line); font-weight: 600; }

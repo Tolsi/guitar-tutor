@@ -683,7 +683,8 @@ function saveWav(part: boolean) {
   status(`Сохранено: ${link.download} (${fmtSpan(b - a)}, WAV 24 бит, ${sr / 1000} кГц).`);
 }
 
-async function importFile(f: File) {
+/** Adds an audio file at `at` (or the marker, or the end). Returns its clip, or null if it could not be read. */
+async function importFile(f: File, at?: { t: number; lane: number }): Promise<Clip | null> {
   try {
     const c = await ensureCtx();
     status(`Читаю «${f.name}»…`);
@@ -698,15 +699,19 @@ async function importFile(f: File) {
     store.push(mono);
     const t = tl!;
     const take = t.newTake(f.name.replace(/\.[^.]+$/, ""), store);
-    const pos = marker !== null ? Math.min(Math.round(marker * sr), t.length) : t.length;
+    const want = at ? at.t : marker;
+    const pos = want !== null ? Math.min(Math.max(0, Math.round(want * sr)), t.length) : t.length;
     t.checkpoint();
-    selClip = t.addClip(take, 0, len, pos, t.freeLane(pos, len));
+    const clip = t.addClip(take, 0, len, pos, t.freeLane(pos, len, Math.min(at?.lane ?? 0, t.lanes - 1)));
+    selClip = clip;
     follow = false;
     status(`Добавлен «${take.name}» (${fmtSpan(len / sr)}).`);
     renderEditState();
+    return clip;
   } catch (e) {
     console.error(e);
     status(`Не удалось открыть «${f.name}»: это не аудиофайл или формат не поддерживается.`);
+    return null;
   }
 }
 
@@ -846,7 +851,7 @@ function drawWave() {
     g.fillStyle = col.text;
     g.textAlign = "center";
     g.fillText(
-      ctx ? "Нажмите ● или клавишу R, чтобы записать, или добавьте файл." : "Включите аудиовход, чтобы увидеть волну.",
+      ctx ? "Нажмите ● или клавишу R, чтобы записать, или перетащите сюда аудиофайл." : "Включите аудиовход или перетащите сюда аудиофайл.",
       W / 2,
       top + (H - top) / 2 - 20 * dpr,
     );
@@ -1251,6 +1256,41 @@ $("ed-add").addEventListener("click", () => edFile.click());
 edFile.addEventListener("change", async () => {
   for (const f of [...(edFile.files ?? [])]) await importFile(f);
   edFile.value = "";
+});
+
+// Files dropped anywhere in the window: on the timeline they land where dropped, elsewhere as from the menu.
+const hasFiles = (e: DragEvent) => !!e.dataTransfer?.types.includes("Files");
+const dropHint = $("drop-hint");
+window.addEventListener("dragover", (e) => {
+  if (!hasFiles(e)) return;
+  // Without this the browser would leave the page for the file.
+  e.preventDefault();
+  const ok = !recording && !dlg.open;
+  e.dataTransfer!.dropEffect = ok ? "copy" : "none";
+  dropHint.hidden = !ok;
+});
+window.addEventListener("dragleave", (e) => {
+  if (!e.relatedTarget) dropHint.hidden = true;
+});
+window.addEventListener("drop", async (e) => {
+  if (!hasFiles(e)) return;
+  e.preventDefault();
+  dropHint.hidden = true;
+  if (recording || dlg.open) {
+    if (recording) status("Идёт запись: остановите её, чтобы добавить файл.");
+    return;
+  }
+  const files = [...e.dataTransfer!.files];
+  const rect = wave.getBoundingClientRect();
+  const onWave =
+    visible && tl?.length && e.clientX >= rect.left && e.clientX <= rect.right && e.clientY >= rect.top && e.clientY <= rect.bottom;
+  let at = onWave ? locate(e.clientX - rect.left, e.clientY - rect.top) : undefined;
+  if (!visible) location.hash = "wave";
+  // Several files go one after another.
+  for (const f of files) {
+    const clip = await importFile(f, at);
+    if (clip) at = { t: clipEnd(clip) / sr, lane: clip.lane };
+  }
 });
 
 const gridSel = $<HTMLSelectElement>("ed-grid");
