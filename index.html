@@ -251,6 +251,7 @@
           <div class="menu-pop" role="menu">
             <button role="menuitemcheckbox" data-view="wave" aria-checked="true">Звуковая волна</button>
             <button role="menuitemcheckbox" data-view="pitch" aria-checked="false">Высота нот</button>
+            <button role="menuitemcheckbox" data-view="loud" aria-checked="false">Громкость нот</button>
             <hr />
             <button role="menuitem" id="vw-all">Показать всю запись<kbd>двойной клик</kbd></button>
             <button role="menuitem" id="vw-live">К реальному времени</button>
@@ -401,6 +402,7 @@
               <div><span>Затухание открытых</span><b id="pm-t-open" class="mono">—</b><small>до −20 дБ, медиана</small></div>
               <div><span>Атака</span><b id="pm-att" class="mono">—</b><small>касание → звук, медиана</small></div>
               <div><span>Чистая атака</span><b id="pm-att-ok" class="mono">—</b><small>одна, не дольше границы</small></div>
+              <div><span>Громкость нот</span><b id="pm-loud" class="mono">—</b><small id="pm-loud-range">медиана</small></div>
               <div><span>Двойных атак</span><b id="pm-doubles" class="mono">0</b></div>
             </div>
           </div>
@@ -445,6 +447,7 @@
               <div><span>Сыграно легато</span><b id="wl-leg" class="mono">0</b></div>
               <div><span>Чистых легато</span><b id="wl-leg-clean" class="mono">—</b></div>
               <div><span>Громкость легато</span><b id="wl-gap" class="mono">—</b><small>к нотам медиатором</small></div>
+              <div><span>Громкость нот</span><b id="wl-loud" class="mono">—</b><small id="wl-loud-range">медиана</small></div>
               <div><span>Частая ошибка</span><b id="wl-top">—</b></div>
             </div>
           </div>

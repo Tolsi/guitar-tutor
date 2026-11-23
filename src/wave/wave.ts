@@ -3,6 +3,7 @@ import { SampleStore } from "./store";
 import type { ChannelMode } from "./capture-worklet";
 import { LOW_LIMIT_K, checkPitches, isPalmMuted, noteOf, type PitchCheck, type PmNote } from "./pm";
 import { AMPS, MONITOR_DEFAULTS, Monitor, type DistType, type MonitorSettings } from "./monitor";
+import { loudness, loudSummary, type LoudNote } from "./loudness";
 import { ISSUE_LABEL, LIMITS, noteName, summarize, type IssueKind, type Note, type Strictness } from "../legato/notes";
 import { Timeline, clipEnd, encodeWav, type Clip, type Take } from "./timeline";
 
@@ -19,9 +20,10 @@ interface Settings {
   /** Headphone monitoring through the amp; also used for playback. */
   monOn: boolean;
   exercise: "free" | "pm" | "pmopen" | "legato";
-  /** What the timeline shows: the waveform, the pitch of the notes, or both (never neither). */
+  /** What the timeline shows: the waveform, the pitch and the loudness of the notes, in any mix (never nothing). */
   showWave: boolean;
   showPitch: boolean;
+  showLoud: boolean;
   lgStrict: Strictness;
   pmLimMs: number;
   attLimMs: number;
@@ -50,6 +52,7 @@ function loadSettings(): Settings {
     exercise: "free",
     showWave: true,
     showPitch: false,
+    showLoud: false,
     lgStrict: "normal",
     pmLimMs: 350,
     attLimMs: 70,
@@ -838,15 +841,24 @@ function drawWave() {
   if (tl && tl.clips.length) {
     const checks = new Map<Take, Map<PmNote, PitchCheck>>();
     if (pitchView()) fitPitch();
+    const loud = new Map<Take, LoudNote[]>();
+    const loudOf = (t: Take) => {
+      let l = loud.get(t);
+      if (!l) loud.set(t, (l = loudNotes(t)));
+      return l;
+    };
+    if (settings.showLoud) fitLoud(loudOf);
+    const mainH = laneH - loudH(laneH);
     for (const c of tl.clips) {
       const x0 = xOf(c.pos / sr), x1 = xOf(clipEnd(c) / sr);
       if (x1 < 0 || x0 > W) continue;
       drawClip(g, c, x0, x1, top + c.lane * laneH, laneH, W, dpr);
-      if (pitchView()) drawPitch(g, W, top + c.lane * laneH, laneH, dpr, xOf, c);
+      if (pitchView()) drawPitch(g, W, top + c.lane * laneH, mainH, dpr, xOf, c);
+      if (settings.showLoud) drawLoud(g, W, top + c.lane * laneH, laneH, dpr, xOf, c, loudOf(c.take));
       if (settings.showWave && pmEx()) {
         let ch = checks.get(c.take);
         if (!ch) checks.set(c.take, (ch = pitchChecks(c.take.pm.notes)));
-        drawPmMarks(g, W, top + c.lane * laneH, waveH(laneH), dpr, xOf, c, ch);
+        drawPmMarks(g, W, top + c.lane * laneH, waveH(mainH), dpr, xOf, c, ch);
       }
     }
   } else {
@@ -903,7 +915,7 @@ function drawClip(g: CanvasRenderingContext2D, c: Clip, x0: number, x1: number, 
     g.restore();
   }
   if (!settings.showWave) return;
-  h = waveH(h);
+  h = waveH(h - loudH(h));
   const mid = y0 + head / 2 + h / 2;
   const amp = ((h - head) / 2 - 4 * dpr) * gain;
   const yTop = y0 + pad + head, yBot = y0 + h - pad;
@@ -1024,11 +1036,11 @@ function renderTime() {
 function loop() {
   if (!visible) return;
   renderTime();
-  if (pmEx() && tl) {
+  if ((pmEx() || (settings.showLoud && !lgEx())) && tl) {
     for (const t of tl.takes) t.pm.update(t.dry ?? t.store);
     const ft = focusTake();
     const key = ft ? `${ft.id}:${ft.pm.version}` : "";
-    if (key !== pmKey) renderPm();
+    if (pmEx() && key !== pmKey) renderPm();
   }
   if ((pitchView() || lgEx()) && tl) {
     // The take on screen first; a long import is worked through a little per frame.
@@ -1367,19 +1379,20 @@ $("vw-auto").addEventListener("click", () => {
   saveSettings();
   renderViewMenu();
 });
-function toggleView(v: "wave" | "pitch") {
-  const key = v === "wave" ? "showWave" : "showPitch";
-  settings[key] = !settings[key];
-  // Something must stay on screen: turning off the only view switches to the other one.
-  if (!settings.showWave && !settings.showPitch) settings[v === "wave" ? "showPitch" : "showWave"] = true;
+type View = "wave" | "pitch" | "loud";
+const VIEW_KEY = { wave: "showWave", pitch: "showPitch", loud: "showLoud" } as const;
+function toggleView(v: View) {
+  settings[VIEW_KEY[v]] = !settings[VIEW_KEY[v]];
+  // Something must stay on screen: turning off the only view switches to another one.
+  if (!settings.showWave && !settings.showPitch && !settings.showLoud) settings[v === "wave" ? "showPitch" : "showWave"] = true;
   saveSettings();
   renderViewMenu();
 }
 for (const el of document.querySelectorAll<HTMLElement>("[data-view]"))
-  el.addEventListener("click", () => toggleView(el.dataset.view as "wave" | "pitch"));
+  el.addEventListener("click", () => toggleView(el.dataset.view as View));
 function renderViewMenu() {
   for (const el of document.querySelectorAll<HTMLElement>("[data-view]"))
-    el.setAttribute("aria-checked", String(el.dataset.view === "wave" ? settings.showWave : settings.showPitch));
+    el.setAttribute("aria-checked", String(settings[VIEW_KEY[el.dataset.view as View]]));
   $("vw-auto").setAttribute("aria-checked", String(settings.autoGain));
 }
 renderViewMenu();
@@ -1823,6 +1836,9 @@ function renderPm() {
   pmKey = take ? `${take.id}:${take.pm.version}` : "";
   const notes = take?.pm.notes ?? [];
   const checks = pitchChecks(notes);
+  const louds = take ? loudNotes(take) : [];
+  const loudAt = new Map(louds.map((l) => [l.start, l]));
+  renderLoudTile("pm", louds);
   const last = notes.at(-1);
   const box = $("pm-verdict");
   const v = last ? judgePm(last, checks) : null;
@@ -1842,6 +1858,8 @@ function renderPm() {
     parts.push(`нота ${fmtNote(last)}`);
     if (v.pitch) parts.push(`от струны ${v.pitch.name} ${fmtCents(v.pitch.cents)}${v.pitch.measuredRef ? "" : " (от строя)"}`);
     parts.push(`затухание ${fmtT20(last)}`);
+    const l = louds.at(-1);
+    if (l && l.start === last.start / sr) parts.push(`громкость ${fmtLoud(l)}`);
     if (last.rate !== null) parts.push(`${Math.round(last.rate)} дБ/с`);
     parts.push(`атака ${fmtAtt(last.attack)}`);
     if (last.bright !== null) parts.push(`глухость ${Math.round((1 - last.bright) * 100)}%`);
@@ -1885,6 +1903,7 @@ function renderPm() {
           `<b>${j.state === "wait" ? "…" : STATE_SHORT[j.state] === "PM" ? "Palm mute" : STATE_SHORT[j.state] === "откр." ? "Открытая" : STATE_SHORT[j.state]}</b>` +
           `<span>${m}:${(t - m * 60).toFixed(2).padStart(5, "0")} · ${fmtT20(n)}</span>` +
           `<span>${pitch}атака ${fmtAtt(n.attack)}${j.slowAttack ? " !" : ""}</span>` +
+          (loudAt.has(n.start / sr) ? `<span>громкость ${fmtLoud(loudAt.get(n.start / sr)!)}</span>` : "") +
           (j.double ? `<span class="pm-bad">двойная атака, ${Math.round(n.doubleGap! * 1000)} мс</span>` : "") +
           (j.detune !== null && j.state !== "wait" ? `<span class="pm-bad">не строит, ${fmtCents(j.detune)}</span>` : "");
         b.disabled = !clip;
@@ -2056,6 +2075,126 @@ function drawPitch(g: CanvasRenderingContext2D, W: number, y0: number, h: number
   g.restore();
 }
 
+// ---------- note loudness ----------
+
+/** Share of a lane the loudness takes under the other views; all of it when alone. */
+const LOUD_SHARE = 0.28;
+const loudH = (laneH: number) =>
+  !settings.showLoud ? 0 : settings.showWave || settings.showPitch ? Math.round(laneH * LOUD_SHARE) : laneH;
+
+const loudOfLegato = (notes: Note[]) => loudness(notes.map((n) => ({ start: n.start, end: n.end, db: n.peakDb })));
+
+/** The take's notes as the exercise sees them: by pitch for legato, by pick attacks otherwise. */
+function loudNotes(take: Take): LoudNote[] {
+  if (lgEx()) return loudOfLegato(take.lg.notes);
+  const all = take.pm.notes;
+  const len = (take.dry ?? take.store).length;
+  // The latest note's level is still rising until its decay shows.
+  const ready = all.filter((n, i) => i < all.length - 1 || n.done || n.t20 !== null);
+  return loudness(
+    ready.map((n, i) => ({
+      start: n.start / sr,
+      end: Math.min(ready[i + 1]?.start ?? len, n.start + (n.t20 ?? 0.2) * sr) / sr,
+      db: n.peakDb,
+    })),
+  );
+}
+
+const fmtLevel = (v: number) => v.toFixed(1).replace("-", "−").replace(".", ",");
+const fmtDiff = (v: number) => (Math.abs(v) < 0.05 ? "±0" : (v > 0 ? "+" : "") + fmtLevel(v));
+const fmtLoud = (l: LoudNote) => `${fmtLevel(l.db)} дБ${l.diff === null ? "" : ` (${fmtDiff(l.diff)})`}`;
+
+function renderLoudTile(id: "pm" | "wl", notes: LoudNote[]) {
+  const s = loudSummary(notes);
+  $(`${id}-loud`).textContent = s ? `${fmtLevel(s.median)} дБ` : "—";
+  $(`${id}-loud-range`).textContent = s && notes.length > 1 ? `медиана, размах ${fmtLevel(s.range)} дБ` : "медиана";
+}
+
+/** dB range of the loudness view; follows the notes on screen. */
+let dLo = -36, dHi = -6;
+const D_MIN_SPAN = 18;
+function fitLoud(of: (t: Take) => LoudNote[]) {
+  let lo = Infinity, hi = -Infinity;
+  for (const c of tl!.clips) {
+    const t0 = viewStart - (c.pos - c.from) / sr;
+    for (const n of of(c.take))
+      if (n.start * sr < c.to && n.end * sr > c.from && n.end >= t0 && n.start <= t0 + viewSpan) {
+        lo = Math.min(lo, n.db);
+        hi = Math.max(hi, n.db);
+      }
+  }
+  if (hi < lo) return;
+  dHi += (hi + 4 - dHi) * 0.2;
+  dLo += (Math.min(lo - 6, hi + 4 - D_MIN_SPAN) - dLo) * 0.2;
+}
+
+/** A bar per note as tall as it is loud; the dashed tick is the level of the notes around it. */
+function drawLoud(g: CanvasRenderingContext2D, W: number, y0: number, h: number, dpr: number, xOf: (t: number) => number, c: Clip, notes: LoudNote[]) {
+  const own = loudH(h);
+  const alone = own === h;
+  const top = y0 + h - own + (alone && h > 46 * dpr ? 16 * dpr : 0);
+  const bottom = y0 + h - 2 * dpr;
+  const shift = (c.pos - c.from) / sr;
+  const x0 = Math.max(0, xOf(c.pos / sr)), x1 = Math.min(W, xOf(clipEnd(c) / sr));
+  if (x1 <= x0 || bottom <= top) return;
+  const Y = (db: number) => bottom - ((db - dLo) / (dHi - dLo)) * (bottom - top);
+  g.save();
+  g.beginPath();
+  g.rect(x0, top, x1 - x0, bottom - top);
+  g.clip();
+  if (!alone) {
+    g.fillStyle = col.axis;
+    g.fillRect(x0, top, x1 - x0, dpr);
+  }
+  g.font = `${10 * dpr}px "IBM Plex Mono", ui-monospace, monospace`;
+  g.textBaseline = "middle";
+  const step = [3, 6, 12, 24].find((s) => (s / (dHi - dLo)) * (bottom - top) >= 16 * dpr) ?? 24;
+  for (let d = Math.ceil(dLo / step) * step; d <= dHi; d += step) {
+    g.fillStyle = col.grid;
+    g.fillRect(x0, Math.round(Y(d)), x1 - x0, dpr);
+  }
+  for (const n of notes) {
+    if (n.start * sr >= c.to || n.end * sr <= c.from) continue;
+    const nx0 = xOf(n.start + shift), nx1 = xOf(n.end + shift);
+    if (nx1 < 0) continue;
+    if (nx0 > W) break;
+    const w = Math.max(2 * dpr, nx1 - nx0 - dpr), y = Y(n.db);
+    g.fillStyle = col.wave;
+    g.globalAlpha = 0.3;
+    g.fillRect(nx0, y, w, bottom - y);
+    g.globalAlpha = 1;
+    g.fillRect(nx0, Math.round(y), w, 2 * dpr);
+    if (n.around !== null) {
+      g.strokeStyle = col.play;
+      g.lineWidth = dpr;
+      g.setLineDash([3 * dpr, 3 * dpr]);
+      g.beginPath();
+      g.moveTo(nx0, Math.round(Y(n.around)) + 0.5 * dpr);
+      g.lineTo(nx0 + w, Math.round(Y(n.around)) + 0.5 * dpr);
+      g.stroke();
+      g.setLineDash([]);
+    }
+    const label = [fmtLoud(n), fmtLevel(n.db)].find((s) => g.measureText(s).width + 6 * dpr < Math.max(w, 24 * dpr));
+    if (label) {
+      const ly = Math.max(top + 7 * dpr, y - 8 * dpr);
+      g.fillStyle = col.stage;
+      g.globalAlpha = 0.8;
+      g.fillRect(nx0, ly - 6 * dpr, g.measureText(label).width + 4 * dpr, 12 * dpr);
+      g.globalAlpha = 1;
+      g.fillStyle = col.text;
+      g.fillText(label, nx0 + 2 * dpr, ly);
+    }
+  }
+  for (let d = Math.ceil(dLo / step) * step; d <= dHi; d += step) {
+    g.fillStyle = col.text;
+    g.globalAlpha = 0.7;
+    const t = `${fmtLevel(d).replace(",0", "")} дБ`;
+    g.fillText(t, x1 - g.measureText(t).width - 4 * dpr, Y(d));
+    g.globalAlpha = 1;
+  }
+  g.restore();
+}
+
 /** The note shown in detail: the one under the marker, or the latest. */
 function wlNote(take: Take | null): Note | null {
   if (!take || !tl) return null;
@@ -2080,6 +2219,9 @@ function renderWl() {
   const notes = take?.lg.notes ?? [];
   const n = wlNote(take);
   const ev = n?.eval ?? null;
+  const louds = loudOfLegato(notes);
+  const loudAt = new Map(notes.map((q, i) => [q, louds[i]]));
+  renderLoudTile("wl", louds);
   $("wl-verdict").dataset.state = !ev ? "none" : ev.clean ? "pm" : "open";
   $("wl-badge").textContent = !n ? "—" : noteName(n.midi);
   $("wl-v-title").textContent = !n || !ev
@@ -2087,7 +2229,7 @@ function renderWl() {
     : ev.clean ? "Чистая нота" : ev.issues.map((i) => ISSUE_LABEL[i.kind]).join(", ");
   const s = (v: number) => `${v > 0 ? "+" : ""}${Math.round(v)}`;
   $("wl-v-sub").textContent = n && ev
-    ? `${n.attack === "pick" ? "медиатор" : "легато"} · ${Math.round((n.end - n.start) * 1000)} мс · центр ${s(ev.center)} ц · отклонение ±${Math.round(ev.spread / 2)} ц · начало ${s(ev.overshoot)} ц · уплыв ${s(ev.drift)} ц`
+    ? `${n.attack === "pick" ? "медиатор" : "легато"} · ${Math.round((n.end - n.start) * 1000)} мс · центр ${s(ev.center)} ц · отклонение ±${Math.round(ev.spread / 2)} ц · начало ${s(ev.overshoot)} ц · уплыв ${s(ev.drift)} ц · громкость ${fmtLoud(loudAt.get(n)!)}`
     : "";
   $("wl-v-hint").textContent = ev ? ev.issues.map((i) => i.text).join(" ") : "";
 
@@ -2122,6 +2264,7 @@ function renderWl() {
         line("b", `${noteName(q.midi)} ${fmtCents(q.eval!.center)}`);
         line("span", `${m}:${(t - m * 60).toFixed(2).padStart(5, "0")} · ${q.attack === "pick" ? "медиатор" : "легато"}`);
         line("span", `отклонение ±${Math.round(q.eval!.spread / 2)} ц`);
+        line("span", `громкость ${fmtLoud(loudAt.get(q)!)}`);
         if (!q.eval!.clean) line("span", q.eval!.issues.map((i) => ISSUE_LABEL[i.kind]).join(", ")).className = "pm-bad";
         b.disabled = !clip;
         b.addEventListener("click", () => {
