@@ -2087,7 +2087,7 @@ function renderWl() {
     : ev.clean ? "Чистая нота" : ev.issues.map((i) => ISSUE_LABEL[i.kind]).join(", ");
   const s = (v: number) => `${v > 0 ? "+" : ""}${Math.round(v)}`;
   $("wl-v-sub").textContent = n && ev
-    ? `${n.attack === "pick" ? "медиатор" : "легато"} · ${Math.round((n.end - n.start) * 1000)} мс · центр ${s(ev.center)} ц · вилянье ±${Math.round(ev.spread / 2)} ц · начало ${s(ev.overshoot)} ц · уплыв ${s(ev.drift)} ц`
+    ? `${n.attack === "pick" ? "медиатор" : "легато"} · ${Math.round((n.end - n.start) * 1000)} мс · центр ${s(ev.center)} ц · отклонение ±${Math.round(ev.spread / 2)} ц · начало ${s(ev.overshoot)} ц · уплыв ${s(ev.drift)} ц`
     : "";
   $("wl-v-hint").textContent = ev ? ev.issues.map((i) => i.text).join(" ") : "";
 
@@ -2121,7 +2121,7 @@ function renderWl() {
         };
         line("b", `${noteName(q.midi)} ${fmtCents(q.eval!.center)}`);
         line("span", `${m}:${(t - m * 60).toFixed(2).padStart(5, "0")} · ${q.attack === "pick" ? "медиатор" : "легато"}`);
-        line("span", `вилянье ±${Math.round(q.eval!.spread / 2)} ц`);
+        line("span", `отклонение ±${Math.round(q.eval!.spread / 2)} ц`);
         if (!q.eval!.clean) line("span", q.eval!.issues.map((i) => ISSUE_LABEL[i.kind]).join(", ")).className = "pm-bad";
         b.disabled = !clip;
         b.addEventListener("click", () => {

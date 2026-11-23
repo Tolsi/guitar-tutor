@@ -319,7 +319,7 @@ function renderDetailText() {
   const nums = document.createElement("p");
   nums.className = "mono lg-nums";
   const s = (v: number) => `${v > 0 ? "+" : ""}${Math.round(v)}`;
-  nums.textContent = `центр ${s(ev.center)} ц · вилянье ±${Math.round(ev.spread / 2)} ц · начало ${s(ev.overshoot)} ц · уплыв ${s(ev.drift)} ц`;
+  nums.textContent = `центр ${s(ev.center)} ц · отклонение ±${Math.round(ev.spread / 2)} ц · начало ${s(ev.overshoot)} ц · уплыв ${s(ev.drift)} ц`;
   const list = document.createElement("ul");
   list.className = "lg-issues";
   if (ev.clean) {
@@ -375,7 +375,7 @@ function renderList() {
       `Ноты легато тише нот с медиатором на ${Math.round(-sum.legatoGapDb)} дБ. Бейте пальцем быстрее и точнее в лад, а не сильнее давите.`,
     );
   if ((sum.issues.wobble ?? 0) >= Math.max(2, sum.count * 0.3))
-    items.push("Вилянье встречается часто. Играйте медленнее и следите, чтобы палец после удара просто держал лад, без раскачки.");
+    items.push("Отклонение встречается часто. Играйте медленнее и следите, чтобы палец после удара просто держал лад, без раскачки.");
   if ((sum.issues.overshoot ?? 0) >= Math.max(2, sum.count * 0.3))
     items.push("Частый пережим при ударе. Ставьте палец ближе к ладовой пластине: тогда нужно меньше силы.");
   tips.replaceChildren(
@@ -420,7 +420,7 @@ function renderTuner(now: number) {
   if (tail.length >= 6) {
     const m = tail.reduce((s, v) => s + v, 0) / tail.length;
     const sd = Math.sqrt(tail.reduce((s, v) => s + (v - m) ** 2, 0) / tail.length);
-    wob.textContent = `вилянье ±${Math.round(sd * 2)} ц`;
+    wob.textContent = `отклонение ±${Math.round(sd * 2)} ц`;
     wob.style.color = sd <= L.wobble ? pal.good : pal.bad;
   } else wob.textContent = "";
 }

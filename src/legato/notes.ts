@@ -31,7 +31,7 @@ export const LIMITS: Record<Strictness, Limits> = {
 export type IssueKind = "wobble" | "overshoot" | "undershoot" | "driftUp" | "driftDown" | "sharp" | "flat";
 
 export const ISSUE_LABEL: Record<IssueKind, string> = {
-  wobble: "виляет",
+  wobble: "отклонение",
   overshoot: "пережим в начале",
   undershoot: "подъезд снизу",
   driftUp: "уплывает вверх",
@@ -187,7 +187,7 @@ export function evaluate(note: Note, L: Limits): NoteEval | null {
   const issues: Issue[] = [];
   const wobbly = wobble > L.wobble || spread > L.spread;
   if (wobbly)
-    issues.push({ kind: "wobble", text: `Нота виляет на ±${r(spread / 2)} ц. Палец меняет давление: держите лад ровно, не раскачивайте струну.` });
+    issues.push({ kind: "wobble", text: `Отклонение ±${r(spread / 2)} ц: палец меняет давление: держите лад ровно, не раскачивайте струну.` });
   const up = drift > L.drift, down = drift < -L.drift;
   if (up)
     issues.push({ kind: "driftUp", text: `Нота уплывает вверх на ${r(drift)} ц: палец давит сильнее или тянет струну вбок.` });
