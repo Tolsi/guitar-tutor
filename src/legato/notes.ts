@@ -76,6 +76,8 @@ export interface TrackerOpts {
   /** Set the gate from the input's own noise instead of gateDb. */
   autoGate: boolean;
   minClarity: number;
+  /** Finished notes kept, oldest dropped first. */
+  maxNotes?: number;
 }
 
 const NAMES = ["C", "C♯", "D", "D♯", "E", "F", "F♯", "G", "G♯", "A", "A♯", "B"];
@@ -305,6 +307,11 @@ export class NoteTracker {
     return ended;
   }
 
+  /** Ends the sounding note: no more frames will come. */
+  flush(): Note | null {
+    return this.finish();
+  }
+
   private finish(): Note | null {
     const n = this.current;
     this.current = null;
@@ -312,7 +319,7 @@ export class NoteTracker {
     n.eval = evaluate(n, this.limits);
     if (!n.eval) return null;
     this.notes.push(n);
-    if (this.notes.length > 300) this.notes.shift();
+    if (this.notes.length > (this.opts.maxNotes ?? 300)) this.notes.shift();
     return n;
   }
 }

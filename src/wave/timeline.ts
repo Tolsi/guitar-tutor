@@ -1,6 +1,7 @@
 // Takes (recorded or imported audio) and clips (pieces of takes placed on lanes of a timeline).
 // A clip refers to a range of its take's samples; moving or splitting a clip never copies audio.
 import { SampleStore } from "./store";
+import { LegatoAnalyzer } from "./legato";
 import { PmAnalyzer } from "./pm";
 
 export interface Take {
@@ -10,6 +11,7 @@ export interface Take {
   /** The clean guitar recorded alongside (before the effects), for analysis; absent for imported files. */
   dry?: SampleStore;
   pm: PmAnalyzer;
+  lg: LegatoAnalyzer;
 }
 
 export interface Clip {
@@ -48,7 +50,7 @@ export class Timeline {
   }
 
   newTake(name: string, store: SampleStore, dry?: SampleStore): Take {
-    const t: Take = { id: this.nextTake++, name, store, dry, pm: new PmAnalyzer(this.sr) };
+    const t: Take = { id: this.nextTake++, name, store, dry, pm: new PmAnalyzer(this.sr), lg: new LegatoAnalyzer(this.sr) };
     this.takes.push(t);
     return t;
   }

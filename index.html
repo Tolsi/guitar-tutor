@@ -249,6 +249,9 @@
         <div class="menu">
           <button class="menu-top" role="menuitem" aria-haspopup="true" aria-expanded="false">Вид</button>
           <div class="menu-pop" role="menu">
+            <button role="menuitemradio" data-view="wave" aria-checked="true">Звуковая волна</button>
+            <button role="menuitemradio" data-view="pitch" aria-checked="false">Высота нот</button>
+            <hr />
             <button role="menuitem" id="vw-all">Показать всю запись<kbd>двойной клик</kbd></button>
             <button role="menuitem" id="vw-live">К реальному времени</button>
             <hr />
@@ -264,6 +267,7 @@
             <button role="menuitemradio" data-ex="free" aria-checked="true">Свободная запись</button>
             <button role="menuitemradio" data-ex="pm" aria-checked="false">Palm mute</button>
             <button role="menuitemradio" data-ex="pmopen" aria-checked="false">Palm mute открытых струн</button>
+            <button role="menuitemradio" data-ex="legato" aria-checked="false">Легато</button>
           </div>
         </div>
  <input id="ed-file" type="file" accept="audio/*,.wav,.mp3,.m4a,.ogg,.flac" multiple hidden />
@@ -308,7 +312,7 @@
         </form>
       </dialog>
       <div class="toolbar">
-        <p class="lede">Волна сигнала с гитары. Запись — ● или R (дубль до 5 минут), каждый дубль — отдельный кусочек: его можно двигать по сетке, переносить на другую дорожку и резать.</p>
+        <p class="lede">Волна сигнала с гитары. Запись — ● или R, каждый дубль — отдельный кусочек: его можно двигать по сетке, переносить на другую дорожку и резать.</p>
         <div class="controls">
           <button id="wv-start" class="btn">Включить аудиовход</button>
           <label class="field">
@@ -419,6 +423,43 @@
             Двойная атака — медиатор задел струну дважды подряд (два щелчка в пределах ~80 мс): звучит как «флэм» и смазывает ритм.
             Если приглушение слабое, нота звенит дольше границы — двиньте ладонь ближе к грифу или прижмите сильнее; если нота глохнет без высоты, ладонь слишком далеко от подставки.
             Нажмите на ноту в списке, чтобы перейти к ней на волне.
+          </p>
+        </section>
+
+        <section id="wl-card" class="lg-card" hidden>
+          <div class="block-head">
+            <h3>Упражнение: легато</h3>
+            <span class="hint">каждая нота ровная: без вилянья, пережима и подтяжек</span>
+          </div>
+          <div class="pm-top">
+            <div id="wl-verdict" class="pm-verdict" data-state="none">
+              <span class="pm-badge" id="wl-badge">—</span>
+              <b id="wl-v-title">Нажмите ● и сыграйте легато</b>
+              <span id="wl-v-sub" class="mono"></span>
+              <span id="wl-v-hint" class="pm-hint"></span>
+            </div>
+            <div class="wv-stats pm-stats">
+              <div><span>Нот</span><b id="wl-count" class="mono">0</b></div>
+              <div><span>Чистых</span><b id="wl-clean" class="mono">—</b></div>
+              <div><span>Сыграно легато</span><b id="wl-leg" class="mono">0</b></div>
+              <div><span>Чистых легато</span><b id="wl-leg-clean" class="mono">—</b></div>
+              <div><span>Громкость легато</span><b id="wl-gap" class="mono">—</b><small>к нотам медиатором</small></div>
+              <div><span>Частая ошибка</span><b id="wl-top">—</b></div>
+            </div>
+          </div>
+          <canvas id="wl-detail" class="lg-detail" aria-label="Высота ноты в центах"></canvas>
+          <label class="field">
+            <span>Строгость</span>
+            <select id="wl-strict">
+              <option value="soft">Мягко</option>
+              <option value="normal">Обычно</option>
+              <option value="strict">Строго</option>
+            </select>
+          </label>
+          <div id="wl-list" class="pm-list" aria-label="Сыгранные ноты"></div>
+          <p class="note">
+            Нажмите на ноту в списке или поставьте маркер на неё, чтобы увидеть её крупно. Начало и отпускание ноты (затенены) в вилянье не входят.
+            Распознаётся одна нота за раз: аккорды и звенящие соседние струны сбивают высоту.
           </p>
         </section>
 

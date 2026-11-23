@@ -3,6 +3,7 @@ import { SampleStore } from "./store";
 import type { ChannelMode } from "./capture-worklet";
 import { LOW_LIMIT_K, checkPitches, isPalmMuted, noteOf, type PitchCheck, type PmNote } from "./pm";
 import { AMPS, MONITOR_DEFAULTS, Monitor, type DistType, type MonitorSettings } from "./monitor";
+import { ISSUE_LABEL, LIMITS, noteName, summarize, type IssueKind, type Note, type Strictness } from "../legato/notes";
 import { Timeline, clipEnd, encodeWav, type Clip, type Take } from "./timeline";
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -17,7 +18,10 @@ interface Settings {
   channel: ChannelMode;
   /** Headphone monitoring through the amp; also used for playback. */
   monOn: boolean;
-  exercise: "free" | "pm" | "pmopen";
+  exercise: "free" | "pm" | "pmopen" | "legato";
+  /** What the timeline shows: the waveform, or the pitch of the notes. */
+  view: "wave" | "pitch";
+  lgStrict: Strictness;
   pmLimMs: number;
   attLimMs: number;
   bpm: number;
@@ -43,6 +47,8 @@ function loadSettings(): Settings {
     channel: "auto",
     monOn: true,
     exercise: "free",
+    view: "wave",
+    lgStrict: "normal",
     pmLimMs: 350,
     attLimMs: 70,
     bpm: 120,
@@ -819,11 +825,13 @@ function drawWave() {
   }
   if (tl && tl.clips.length) {
     const checks = new Map<Take, Map<PmNote, PitchCheck>>();
+    if (pitchView()) fitPitch();
     for (const c of tl.clips) {
       const x0 = xOf(c.pos / sr), x1 = xOf(clipEnd(c) / sr);
       if (x1 < 0 || x0 > W) continue;
       drawClip(g, c, x0, x1, top + c.lane * laneH, laneH, W, dpr);
-      if (pmEx()) {
+      if (pitchView()) drawPitch(g, W, top + c.lane * laneH, laneH, dpr, xOf, c);
+      else if (pmEx()) {
         let ch = checks.get(c.take);
         if (!ch) checks.set(c.take, (ch = pitchChecks(c.take.pm.notes)));
         drawPmMarks(g, W, top + c.lane * laneH, laneH, dpr, xOf, c, ch);
@@ -882,6 +890,7 @@ function drawClip(g: CanvasRenderingContext2D, c: Clip, x0: number, x1: number, 
     g.textBaseline = "middle";
     g.restore();
   }
+  if (pitchView()) return;
   const mid = y0 + head / 2 + h / 2;
   const amp = ((h - head) / 2 - 4 * dpr) * gain;
   const yTop = y0 + pad + head, yBot = y0 + h - pad;
@@ -1007,6 +1016,20 @@ function loop() {
     const ft = focusTake();
     const key = ft ? `${ft.id}:${ft.pm.version}` : "";
     if (key !== pmKey) renderPm();
+  }
+  if ((pitchView() || lgEx()) && tl) {
+    // The take on screen first; a long import is worked through a little per frame.
+    const deadline = performance.now() + 10;
+    const ft = focusTake();
+    for (const t of [...(ft ? [ft] : []), ...tl.takes.filter((t) => t !== ft)]) {
+      t.lg.setLimits(LIMITS[settings.lgStrict]);
+      t.lg.update(t.dry ?? t.store, t !== rec?.take, deadline);
+    }
+    if (lgEx()) {
+      const key = wlKeyOf(ft);
+      if (key !== wlKey) renderWl();
+      drawWlDetail();
+    }
   }
   const pos = playPos();
   if (pos !== null && !drag && (pos > viewStart + viewSpan || pos < viewStart)) {
@@ -1296,7 +1319,16 @@ $("vw-auto").addEventListener("click", () => {
   saveSettings();
   renderViewMenu();
 });
+function setView(v: Settings["view"]) {
+  settings.view = v;
+  saveSettings();
+  renderViewMenu();
+}
+for (const el of document.querySelectorAll<HTMLElement>("[data-view]"))
+  el.addEventListener("click", () => setView(el.dataset.view as Settings["view"]));
 function renderViewMenu() {
+  for (const el of document.querySelectorAll<HTMLElement>("[data-view]"))
+    el.setAttribute("aria-checked", String(el.dataset.view === settings.view));
   $("vw-auto").setAttribute("aria-checked", String(settings.autoGain));
 }
 renderViewMenu();
@@ -1597,7 +1629,7 @@ const median = (a: number[]) => {
 };
 
 /** Both palm-mute exercises; "pmopen" also checks the muted note keeps the open string's pitch. */
-const pmEx = () => settings.exercise !== "free";
+const pmEx = () => settings.exercise === "pm" || settings.exercise === "pmopen";
 const pitchEx = () => settings.exercise === "pmopen";
 const pitchChecks = (notes: PmNote[]) => (pitchEx() ? checkPitches(notes, pmLimit()) : new Map<PmNote, PitchCheck>());
 
@@ -1827,6 +1859,9 @@ function applyExercise() {
   for (const el of document.querySelectorAll<HTMLElement>("[data-ex]"))
     el.setAttribute("aria-checked", String(el.dataset.ex === settings.exercise));
   $("pm-card").hidden = !isPm;
+  $("wl-card").hidden = !lgEx();
+  $<HTMLSelectElement>("wl-strict").value = settings.lgStrict;
+  wlKey = "";
   $<HTMLInputElement>("pm-lim").value = String(settings.pmLimMs);
   $("pm-lim-v").textContent = `${fmtSec(pmLimit())} (5–6 струны — ${fmtSec(pmLimit() * LOW_LIMIT_K)})`;
   $<HTMLInputElement>("pm-att-lim").value = String(settings.attLimMs);
@@ -1834,6 +1869,249 @@ function applyExercise() {
   pmKey = "";
   if (isPm) renderPm();
 }
+
+// ---------- note pitch view and legato exercise ----------
+
+const pitchView = () => settings.view === "pitch";
+const lgEx = () => settings.exercise === "legato";
+let wlKey = "";
+/** MIDI range of the pitch view; follows the notes on screen. */
+let pLo = 45, pHi = 59;
+const P_MIN_SPAN = 8;
+
+/** First index in sorted `a` at or after `v`. */
+function lowerBound(a: number[], v: number) {
+  let lo = 0, hi = a.length;
+  while (lo < hi) {
+    const m = (lo + hi) >> 1;
+    if (a[m] < v) lo = m + 1;
+    else hi = m;
+  }
+  return lo;
+}
+
+const clipNotes = (c: Clip, all: Note[]) => all.filter((n) => n.end * sr > c.from && n.start * sr < c.to);
+
+/** Fits the pitch range to the notes on screen, gliding so it does not jump. */
+function fitPitch() {
+  let lo = Infinity, hi = -Infinity;
+  for (const c of tl!.clips) {
+    const t0 = viewStart - (c.pos - c.from) / sr, t1 = t0 + viewSpan;
+    const lg = c.take.lg;
+    for (const n of clipNotes(c, lg.current ? [...lg.notes, lg.current] : lg.notes))
+      if (n.end >= t0 && n.start <= t1) {
+        lo = Math.min(lo, n.midi);
+        hi = Math.max(hi, n.midi);
+      }
+  }
+  if (hi < lo) return;
+  const extra = Math.max(0, P_MIN_SPAN - (hi - lo + 2)) / 2;
+  pLo += (lo - 1 - extra - pLo) * 0.2;
+  pHi += (hi + 1 + extra - pHi) * 0.2;
+}
+
+const lgColor = (n: Note) => (n.eval ? (n.eval.clean ? col.play : col.warn) : col.text);
+
+function drawPitch(g: CanvasRenderingContext2D, W: number, y0: number, h: number, dpr: number, xOf: (t: number) => number, c: Clip) {
+  const top = y0 + (h > 46 * dpr ? 16 * dpr : 2 * dpr);
+  const bottom = y0 + h - 2 * dpr;
+  const shift = (c.pos - c.from) / sr;
+  const x0 = Math.max(0, xOf(c.pos / sr)), x1 = Math.min(W, xOf(clipEnd(c) / sr));
+  if (x1 <= x0) return;
+  const Y = (m: number) => bottom - ((m - pLo) / (pHi - pLo)) * (bottom - top);
+  const rowH = (bottom - top) / (pHi - pLo);
+  g.save();
+  g.beginPath();
+  g.rect(x0, top, x1 - x0, bottom - top);
+  g.clip();
+  g.font = `${10 * dpr}px "IBM Plex Mono", ui-monospace, monospace`;
+  g.textBaseline = "middle";
+  for (let m = Math.ceil(pLo); m <= pHi; m++) {
+    const natural = ![1, 3, 6, 8, 10].includes(((m % 12) + 12) % 12);
+    g.fillStyle = natural ? col.axis : col.grid;
+    g.globalAlpha = 0.5;
+    g.fillRect(x0, Math.round(Y(m)), x1 - x0, dpr);
+    g.globalAlpha = 1;
+    if (rowH >= 11 * dpr || m % 12 === 0) {
+      g.fillStyle = col.text;
+      g.fillText(noteName(m), x0 + 4 * dpr, Y(m));
+    }
+  }
+
+  // Every voiced frame, faintly: what was heard but made no note.
+  const lg = c.take.lg;
+  const a = lowerBound(lg.frameT, Math.max(c.from / sr, viewStart - shift));
+  const tEnd = Math.min(c.to / sr, viewStart + viewSpan - shift);
+  g.fillStyle = col.text;
+  g.globalAlpha = 0.35;
+  for (let i = a; i < lg.frameT.length && lg.frameT[i] < tEnd; i++)
+    g.fillRect(xOf(lg.frameT[i] + shift) - dpr, Y(lg.frameM[i]) - dpr, 2 * dpr, 2 * dpr);
+  g.globalAlpha = 1;
+
+  const L = LIMITS[settings.lgStrict];
+  for (const n of clipNotes(c, lg.current ? [...lg.notes, lg.current] : lg.notes)) {
+    const nx0 = xOf(n.start + shift), nx1 = xOf(n.end + shift);
+    if (nx1 < 0 || nx0 > W) continue;
+    const color = lgColor(n);
+    const ev = n.eval;
+    if (ev) {
+      // The judged part, as wide as the pitch may wander.
+      const mid = n.midi + ev.center / 100, half = L.spread / 200;
+      g.fillStyle = color;
+      g.globalAlpha = 0.18;
+      g.fillRect(xOf(ev.from + shift), Y(mid + half), xOf(ev.to + shift) - xOf(ev.from + shift), Y(mid - half) - Y(mid + half));
+      g.globalAlpha = 1;
+    }
+    g.fillStyle = color;
+    g.globalAlpha = 0.6;
+    g.fillRect(Math.round(nx0), Y(n.midi + 0.4), dpr, Y(n.midi - 0.4) - Y(n.midi + 0.4));
+    g.globalAlpha = 1;
+    g.strokeStyle = color;
+    g.lineWidth = 2 * dpr;
+    g.beginPath();
+    n.points.forEach((p, i) => {
+      const x = xOf(p.t + shift), y = Y(n.midi + p.cents / 100);
+      if (i) g.lineTo(x, y);
+      else g.moveTo(x, y);
+    });
+    g.stroke();
+    const name = noteName(n.midi);
+    const full = ev ? `${name} ${fmtCents(ev.center)}${ev.clean ? "" : ` ${ev.issues.map((i) => ISSUE_LABEL[i.kind]).join(", ")}`}` : name;
+    const label = [full, name].find((s) => g.measureText(s).width + 6 * dpr < Math.max(nx1 - nx0, 24 * dpr));
+    if (label) {
+      const peak = Math.max(...n.points.map((p) => p.cents));
+      const ly = Math.max(top + 7 * dpr, Y(n.midi + Math.max(peak, 0) / 100) - 10 * dpr);
+      g.fillStyle = col.stage;
+      g.globalAlpha = 0.8;
+      g.fillRect(nx0 + 2 * dpr, ly - 7 * dpr, g.measureText(label).width + 4 * dpr, 14 * dpr);
+      g.globalAlpha = 1;
+      g.fillStyle = color;
+      g.fillText(label, nx0 + 4 * dpr, ly);
+    }
+  }
+  g.restore();
+}
+
+/** The note shown in detail: the one under the marker, or the latest. */
+function wlNote(take: Take | null): Note | null {
+  if (!take || !tl) return null;
+  if (marker !== null && !recording) {
+    const s = marker * sr;
+    for (const c of tl.clips)
+      if (c.take === take && s >= c.pos && s < clipEnd(c)) {
+        const t = (s - c.pos + c.from) / sr;
+        const n = take.lg.notes.find((n) => t >= n.start && t <= n.end);
+        if (n) return n;
+      }
+  }
+  return take.lg.notes.at(-1) ?? null;
+}
+
+const wlKeyOf = (take: Take | null) =>
+  take ? `${take.id}:${take.lg.version}:${wlNote(take)?.id ?? ""}:${settings.lgStrict}:${tl!.clips.map((c) => `${c.id}.${c.pos}.${c.from}.${c.to}`).join()}` : "-";
+
+function renderWl() {
+  const take = focusTake();
+  wlKey = wlKeyOf(take);
+  const notes = take?.lg.notes ?? [];
+  const n = wlNote(take);
+  const ev = n?.eval ?? null;
+  $("wl-verdict").dataset.state = !ev ? "none" : ev.clean ? "pm" : "warn";
+  $("wl-badge").textContent = !n ? "—" : noteName(n.midi);
+  $("wl-v-title").textContent = !n || !ev
+    ? recording ? "Сыграйте ноту" : "Нажмите ● и сыграйте легато"
+    : ev.clean ? "Чистая нота" : ev.issues.map((i) => ISSUE_LABEL[i.kind]).join(", ");
+  const s = (v: number) => `${v > 0 ? "+" : ""}${Math.round(v)}`;
+  $("wl-v-sub").textContent = n && ev
+    ? `${n.attack === "pick" ? "медиатор" : "легато"} · ${Math.round((n.end - n.start) * 1000)} мс · центр ${s(ev.center)} ц · вилянье ±${Math.round(ev.spread / 2)} ц · начало ${s(ev.overshoot)} ц · уплыв ${s(ev.drift)} ц`
+    : "";
+  $("wl-v-hint").textContent = ev ? ev.issues.map((i) => i.text).join(" ") : "";
+
+  const sum = summarize(notes);
+  const pct = (a: Note[]) => (a.length ? `${Math.round((a.filter((n) => n.eval?.clean).length / a.length) * 100)}%` : "—");
+  const leg = notes.filter((n) => n.attack === "legato");
+  $("wl-count").textContent = String(sum.count);
+  $("wl-clean").textContent = pct(notes);
+  $("wl-leg").textContent = String(leg.length);
+  $("wl-leg-clean").textContent = pct(leg);
+  $("wl-gap").textContent = sum.legatoGapDb === null ? "—" : `${s(sum.legatoGapDb)} дБ`;
+  const worst = (Object.entries(sum.issues) as [IssueKind, number][]).sort((a, b) => b[1] - a[1])[0];
+  $("wl-top").textContent = worst ? `${ISSUE_LABEL[worst[0]]} ×${worst[1]}` : "—";
+
+  $("wl-list").replaceChildren(
+    ...notes
+      .slice(-60)
+      .reverse()
+      .map((q) => {
+        const b = document.createElement("button");
+        b.className = `pm-note ${q.eval?.clean ? "pm" : "warn"}`;
+        const clip = tl?.clips.find((c) => c.take === take && q.start * sr < c.to && q.end * sr > c.from);
+        const at = Math.max(q.start, clip ? clip.from / sr : 0);
+        const t = clip ? (clip.pos - clip.from) / sr + at : q.start;
+        const m = Math.floor(t / 60);
+        const line = (tag: string, text: string) => {
+          const el = document.createElement(tag);
+          el.textContent = text;
+          b.append(el);
+          return el;
+        };
+        line("b", `${noteName(q.midi)} ${fmtCents(q.eval!.center)}`);
+        line("span", `${m}:${(t - m * 60).toFixed(2).padStart(5, "0")} · ${q.attack === "pick" ? "медиатор" : "легато"}`);
+        line("span", `вилянье ±${Math.round(q.eval!.spread / 2)} ц`);
+        if (!q.eval!.clean) line("span", q.eval!.issues.map((i) => ISSUE_LABEL[i.kind]).join(", ")).className = "pm-bad";
+        b.disabled = !clip;
+        b.addEventListener("click", () => {
+          follow = false;
+          viewSpan = Math.max(Math.min(viewSpan, 2), (q.end - q.start) * 3);
+          viewStart = t - viewSpan * 0.2;
+          clampView();
+          // Just inside the note, so it is the one shown in detail.
+          setMarker(t + Math.min(0.01, (q.end - at) / 2));
+        });
+        return b;
+      }),
+  );
+}
+
+/** The note's pitch in cents, magnified. */
+function drawWlDetail() {
+  const { g, W, H, dpr } = fit($<HTMLCanvasElement>("wl-detail"));
+  g.fillStyle = col.stage;
+  g.fillRect(0, 0, W, H);
+  const range = 50, left = 34 * dpr;
+  const Y = (c: number) => H / 2 - (Math.max(-range, Math.min(range, c)) / range) * (H / 2 - 10 * dpr);
+  g.font = `${11 * dpr}px "IBM Plex Mono", ui-monospace, monospace`;
+  g.textBaseline = "middle";
+  for (const c of [-50, -25, 0, 25, 50]) {
+    g.fillStyle = col.grid;
+    g.fillRect(left, Math.round(Y(c)), W - left, dpr);
+    g.fillStyle = col.text;
+    g.fillText(`${c > 0 ? "+" : ""}${c}`, 2 * dpr, Y(c));
+  }
+  const n = wlNote(focusTake());
+  if (!n?.eval) return;
+  const ev = n.eval, half = LIMITS[settings.lgStrict].spread / 2;
+  const X = (t: number) => left + ((t - n.start) / Math.max(0.05, n.end - n.start)) * (W - left - 4 * dpr);
+  g.fillStyle = col.play;
+  g.globalAlpha = 0.14;
+  g.fillRect(X(ev.from), Y(ev.center + half), X(ev.to) - X(ev.from), Y(ev.center - half) - Y(ev.center + half));
+  // Attack and release: not judged.
+  g.fillStyle = col.text;
+  g.globalAlpha = 0.12;
+  g.fillRect(left, 0, X(ev.from) - left, H);
+  g.fillRect(X(ev.to), 0, W - X(ev.to), H);
+  g.globalAlpha = 1;
+  g.strokeStyle = lgColor(n);
+  g.lineWidth = 2 * dpr;
+  g.beginPath();
+  n.points.forEach((p, i) => (i ? g.lineTo(X(p.t), Y(p.cents)) : g.moveTo(X(p.t), Y(p.cents))));
+  g.stroke();
+}
+
+$<HTMLSelectElement>("wl-strict").addEventListener("change", (e) => {
+  settings.lgStrict = (e.target as HTMLSelectElement).value as Strictness;
+  saveSettings();
+});
 
 /** Palm mute is practised on a driven tone: the distortion pedal goes on at full drive. */
 function pmTone() {
@@ -1844,8 +2122,12 @@ function pmTone() {
 }
 
 function setExercise(ex: Settings["exercise"]) {
+  // The legato exercise is about pitch; leaving it brings the waveform back.
+  if (ex === "legato") settings.view = "pitch";
+  else if (settings.exercise === "legato") settings.view = "wave";
   settings.exercise = ex;
-  if (ex !== "free") pmTone();
+  if (pmEx()) pmTone();
+  renderViewMenu();
   saveSettings();
   applyExercise();
 }
