@@ -1101,10 +1101,16 @@ wave.addEventListener(
       }
     } else if (e.altKey) {
       e.preventDefault();
+      const zoom = Math.exp(-(dy || dx) * 0.003);
+      const at = pitchAt(e.clientY - rect.top, rect.height);
+      if (at !== null) {
+        zoomPitch(zoom, at);
+        return;
+      }
       settings.autoGain = false;
       saveSettings();
       renderViewMenu();
-      gain = Math.min(MAX_GAIN, Math.max(1, gain * Math.exp(-(dy || dx) * 0.003)));
+      gain = Math.min(MAX_GAIN, Math.max(1, gain * zoom));
     } else if (e.shiftKey || Math.abs(dx) > Math.abs(dy)) {
       e.preventDefault();
       const d = Math.abs(dx) > Math.abs(dy) ? dx : dy;
@@ -1369,6 +1375,7 @@ $("vw-zin").addEventListener("click", () => zoomBy(0.5));
 $("vw-zout").addEventListener("click", () => zoomBy(2));
 $("vw-gain").addEventListener("click", () => {
   gain = 1;
+  pManual = false;
   settings.autoGain = false;
   saveSettings();
   renderViewMenu();
@@ -1951,6 +1958,33 @@ let wlKey = "";
 /** MIDI range of the pitch view; follows the notes on screen. */
 let pLo = 45, pHi = 59;
 const P_MIN_SPAN = 8;
+/** Zoomed by hand: the range stays put. Zooming all the way out returns it to following the notes. */
+let pManual = false;
+let pAutoSpan = 14;
+/** Closest zoom, semitones from bottom to top. */
+const P_ZOOM_MIN = 0.4;
+
+/** Where the pitch view under canvas height `y` (CSS px) is, 0 bottom … 1 top; null outside it. */
+function pitchAt(y: number, height: number): number | null {
+  if (!pitchView() || y < RULER) return null;
+  const laneH = (height - RULER) / laneCount();
+  const inLane = (y - RULER) % laneH;
+  const main = laneH - loudH(laneH);
+  const top = Math.max(waveH(main), main > 46 ? 16 : 2), bottom = main - 2;
+  return inLane < top || inLane > bottom ? null : (bottom - inLane) / (bottom - top);
+}
+
+/** Magnifies the pitch view around the height `at`. */
+function zoomPitch(factor: number, at: number) {
+  const span = pHi - pLo;
+  const want = Math.max(P_ZOOM_MIN, span / factor);
+  pManual = want < pAutoSpan;
+  if (!pManual) return;
+  const m = pLo + at * span;
+  pLo = m - at * want;
+  pHi = pLo + want;
+}
+
 
 /** First index in sorted `a` at or after `v`. */
 function lowerBound(a: number[], v: number) {
@@ -1979,6 +2013,8 @@ function fitPitch() {
   }
   if (hi < lo) return;
   const extra = Math.max(0, P_MIN_SPAN - (hi - lo + 2)) / 2;
+  pAutoSpan = hi - lo + 2 + 2 * extra;
+  if (pManual) return;
   pLo += (lo - 1 - extra - pLo) * 0.2;
   pHi += (hi + 1 + extra - pHi) * 0.2;
 }
@@ -2015,6 +2051,21 @@ function drawPitch(g: CanvasRenderingContext2D, W: number, y0: number, h: number
       g.fillText(noteName(m), x0 + 4 * dpr, Y(m));
     }
   }
+
+  // Magnified: lines between the notes, in cents.
+  const centStep = [5, 10, 25].find((v) => (v / 100) * rowH >= 16 * dpr);
+  if (centStep)
+    for (let i = Math.ceil((pLo * 100) / centStep); i * centStep <= pHi * 100; i++) {
+      const m = Math.round((i * centStep) / 100), cents = i * centStep - m * 100;
+      if (!cents) continue;
+      const y = Y(m + cents / 100);
+      g.fillStyle = col.grid;
+      g.fillRect(x0, Math.round(y), x1 - x0, dpr);
+      g.fillStyle = col.text;
+      g.globalAlpha = 0.7;
+      g.fillText(`${noteName(m)} ${cents > 0 ? "+" : "−"}${Math.abs(cents)}`, x0 + 4 * dpr, y);
+      g.globalAlpha = 1;
+    }
 
   // Every voiced frame, faintly: what was heard but made no note.
   const lg = c.take.lg;
