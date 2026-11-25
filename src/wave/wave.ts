@@ -3,6 +3,7 @@ import { SampleStore } from "./store";
 import type { ChannelMode } from "./capture-worklet";
 import { LOW_LIMIT_K, checkPitches, isPalmMuted, noteOf, type PitchCheck, type PmNote } from "./pm";
 import { AMPS, MONITOR_DEFAULTS, Monitor, type DistType, type MonitorSettings } from "./monitor";
+import { feedTuner, initTuner } from "./tuner";
 import { loudness, loudSummary, type LoudNote } from "./loudness";
 import { ISSUE_LABEL, LIMITS, noteName, summarize, type IssueKind, type Note, type Strictness } from "../legato/notes";
 import { Timeline, clipEnd, encodeWav, type Clip, type Take } from "./timeline";
@@ -182,6 +183,7 @@ function clampView() {
 
 /** Blocks of the raw input (after channel choice and input gain): only the level meter and warning. */
 function onInputBlock(d: Float32Array) {
+  feedTuner(d, sr);
   let pk = 0;
   for (let i = 0; i < d.length; i++) pk = Math.max(pk, Math.abs(d[i]));
   const db = pk > 0 ? 20 * Math.log10(pk) : -Infinity;
@@ -1358,7 +1360,8 @@ const KEYS: Record<string, () => void> = {
   },
 };
 window.addEventListener("keydown", (e) => {
-  if (!visible) return;
+  // In a dialog the keys are its own.
+  if (!visible || document.querySelector("dialog[open]")) return;
   const t = e.target as HTMLElement;
   if (t.closest("input, select, textarea, [contenteditable]")) return;
   if ((e.metaKey || e.ctrlKey) && e.code === "KeyZ" && !e.shiftKey) {
@@ -1456,6 +1459,8 @@ $("wv-ingain-reset").addEventListener("click", () => {
   showInGain();
   if (dlg.open) fillSettings();
 });
+
+initTuner({ inputOn: () => !!node, openInput: () => void openInput() });
 
 // ---------- settings dialog ----------
 

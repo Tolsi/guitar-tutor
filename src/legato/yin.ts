@@ -2,11 +2,9 @@
 
 // Guitar fundamentals stay under ~1.4 kHz, so about 24 kHz keeps the accuracy and quarters the YIN cost.
 const RATE = 24000;
-const BUF = 1024;
-const HOP = 256;
 const THRESHOLD = 0.15;
-const F_MIN = 70;
-const F_MAX = 1400;
+/** Window and step in samples at RATE; pitch range in Hz (the window must hold two periods of fMin). */
+const DEFAULTS = { buf: 1024, hop: 256, fMin: 70, fMax: 1400 };
 
 export interface YinFrame {
   f0: number | null;
@@ -22,8 +20,10 @@ export class YinStream {
   private readonly tauMin: number;
   private readonly tauMax: number;
   private readonly win: number;
-  private readonly ring = new Float32Array(BUF);
-  private readonly frame = new Float32Array(BUF);
+  private readonly buf: number;
+  private readonly hop: number;
+  private readonly ring: Float32Array;
+  private readonly frame: Float32Array;
   private readonly d: Float32Array;
   private pos = 0;
   private filled = 0;
@@ -31,18 +31,24 @@ export class YinStream {
   private acc = 0;
   private accN = 0;
 
-  constructor(sampleRate: number) {
+  constructor(sampleRate: number, opts: Partial<typeof DEFAULTS> = {}) {
+    const { buf: BUF, hop, fMin, fMax } = { ...DEFAULTS, ...opts };
+    this.buf = BUF;
+    this.hop = hop;
+    this.ring = new Float32Array(BUF);
+    this.frame = new Float32Array(BUF);
     this.decim = Math.max(1, Math.round(sampleRate / RATE));
     this.sr = sampleRate / this.decim;
     this.latency = BUF / 2 / this.sr;
-    this.tauMin = Math.floor(this.sr / F_MAX);
-    this.tauMax = Math.min(Math.ceil(this.sr / F_MIN), BUF / 2);
+    this.tauMin = Math.floor(this.sr / fMax);
+    this.tauMax = Math.min(Math.ceil(this.sr / fMin), BUF / 2);
     this.win = BUF - this.tauMax;
     this.d = new Float32Array(this.tauMax + 2);
   }
 
   /** `emit` gets each frame with the index after the sample in `x` that completed it. */
   push(x: Float32Array, emit: (end: number, f: YinFrame) => void) {
+    const BUF = this.buf, HOP = this.hop;
     for (let i = 0; i < x.length; i++) {
       this.acc += x[i];
       if (++this.accN < this.decim) continue;
@@ -59,7 +65,7 @@ export class YinStream {
   }
 
   private detect(): YinFrame {
-    const x = this.frame;
+    const x = this.frame, BUF = this.buf;
     let mean = 0;
     for (let k = 0; k < BUF; k++) {
       x[k] = this.ring[(this.pos + k) % BUF];

@@ -271,8 +271,41 @@
             <button role="menuitemradio" data-ex="legato" aria-checked="false">Легато</button>
           </div>
         </div>
+        <div class="menu">
+          <button class="menu-top" role="menuitem" aria-haspopup="true" aria-expanded="false">Инструменты</button>
+          <div class="menu-pop" role="menu">
+            <button role="menuitem" id="tn-open">Настройка гитары…</button>
+          </div>
+        </div>
  <input id="ed-file" type="file" accept="audio/*,.wav,.mp3,.m4a,.ogg,.flac" multiple hidden />
       </nav>
+      <dialog id="tuner" class="settings" aria-labelledby="tn-title">
+        <form method="dialog">
+          <h2 id="tn-title">Настройка гитары</h2>
+          <div class="st-row">
+            <label class="field"><span>Строй</span><select id="tn-tuning"></select></label>
+            <label class="field"><span>Ля, Гц</span><input id="tn-a4" type="number" min="415" max="466" step="1" class="num" /></label>
+          </div>
+          <div class="tuner-note"><b id="tn-note">—</b><span id="tn-cents" class="mono"></span></div>
+          <div class="tuner-scale" aria-hidden="true">
+            <span class="tick" style="left: 0%">−50</span>
+            <span class="tick" style="left: 25%">−25</span>
+            <span class="tick zero" style="left: 50%">0</span>
+            <span class="tick" style="left: 75%">+25</span>
+            <span class="tick" style="left: 100%">+50 ц</span>
+            <i id="tn-needle" class="needle"></i>
+          </div>
+          <div class="level" title="Уровень входа"><i id="tn-level"></i></div>
+          <p id="tn-hint" class="tn-hint"></p>
+          <div id="tn-strings" class="tn-strings" aria-label="Струны"></div>
+          <p class="note">Струна определяется сама; нажмите на струну, чтобы слушать только её, ещё раз — чтобы вернуть авто. Зелёная — настроена (±3 цента).</p>
+          <p id="tn-status" class="note" role="status"></p>
+          <div class="st-actions">
+            <button id="tn-input" type="button" class="btn ghost">Включить аудиовход</button>
+            <button class="btn" value="ok">Готово</button>
+          </div>
+        </form>
+      </dialog>
       <dialog id="settings" class="settings" aria-labelledby="st-title">
         <form method="dialog">
           <h2 id="st-title">Настройки</h2>
