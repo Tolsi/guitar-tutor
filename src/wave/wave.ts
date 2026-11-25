@@ -3,6 +3,7 @@ import { SampleStore } from "./store";
 import type { ChannelMode } from "./capture-worklet";
 import { LOW_LIMIT_K, checkPitches, isPalmMuted, noteOf, type PitchCheck, type PmNote } from "./pm";
 import { AMPS, MONITOR_DEFAULTS, Monitor, type DistType, type MonitorSettings } from "./monitor";
+import { BPM_MAX, BPM_MIN, initMetronome, showMetronomeBpm, stopMetronome, toggleMetronome } from "./metronome";
 import { feedTuner, initTuner } from "./tuner";
 import { loudness, loudSummary, type LoudNote } from "./loudness";
 import { ISSUE_LABEL, LIMITS, noteName, summarize, type IssueKind, type Note, type Strictness } from "../legato/notes";
@@ -165,7 +166,7 @@ export function setWaveVisible(v: boolean) {
   if (v) {
     col = readColors();
     requestAnimationFrame(loop);
-  }
+  } else stopMetronome(); // its controls are on this tab
 }
 
 const total = () => (tl ? tl.length / sr : 0);
@@ -1340,16 +1341,22 @@ gridSel.addEventListener("change", () => {
 });
 bpmIn.addEventListener("change", () => {
   const v = Number(bpmIn.value);
-  if (v >= 30 && v <= 300) settings.bpm = v;
-  bpmIn.value = String(settings.bpm);
-  saveSettings();
+  setBpm(v >= BPM_MIN && v <= BPM_MAX ? v : settings.bpm);
 });
+/** The tempo is one for the grid and the metronome. */
+function setBpm(v: number) {
+  settings.bpm = v;
+  bpmIn.value = String(v);
+  showMetronomeBpm();
+  saveSettings();
+}
 
 const KEYS: Record<string, () => void> = {
   Space: spaceAction,
   Home: toStart,
   End: toEnd,
   KeyR: () => setRecording(!recording),
+  KeyM: toggleMetronome,
   KeyS: splitAtMarker,
   Delete: deleteClip,
   Backspace: deleteClip,
@@ -1360,8 +1367,8 @@ const KEYS: Record<string, () => void> = {
   },
 };
 window.addEventListener("keydown", (e) => {
-  // In a dialog the keys are its own.
-  if (!visible || document.querySelector("dialog[open]")) return;
+  // In a modal dialog the keys are its own.
+  if (!visible || document.querySelector("dialog:modal")) return;
   const t = e.target as HTMLElement;
   if (t.closest("input, select, textarea, [contenteditable]")) return;
   if ((e.metaKey || e.ctrlKey) && e.code === "KeyZ" && !e.shiftKey) {
@@ -1460,6 +1467,7 @@ $("wv-ingain-reset").addEventListener("click", () => {
   if (dlg.open) fillSettings();
 });
 
+initMetronome({ audio: ensureCtx, bpm: () => settings.bpm, setBpm });
 initTuner({ inputOn: () => !!node, openInput: () => void openInput() });
 
 // ---------- settings dialog ----------
@@ -1509,7 +1517,7 @@ for (const f of FIELDS) {
     showInGain();
     renderViewMenu();
     gridSel.value = settings.grid;
-    bpmIn.value = String(settings.bpm);
+    setBpm(settings.bpm);
     applyExercise();
   });
 }

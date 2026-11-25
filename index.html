@@ -275,10 +275,39 @@
           <button class="menu-top" role="menuitem" aria-haspopup="true" aria-expanded="false">Инструменты</button>
           <div class="menu-pop" role="menu">
             <button role="menuitem" id="tn-open">Настройка гитары…</button>
+            <button role="menuitem" id="mt-open">Метроном…<kbd>M</kbd></button>
           </div>
         </div>
  <input id="ed-file" type="file" accept="audio/*,.wav,.mp3,.m4a,.ogg,.flac" multiple hidden />
       </nav>
+      <dialog id="metronome" class="settings mt" aria-labelledby="mt-title">
+        <div class="mt-body">
+          <div class="mt-head"><h2 id="mt-title">Метроном</h2><button id="mt-close" type="button" class="tp" aria-label="Закрыть окно">✕</button></div>
+          <div id="mt-dots" class="mt-dots" aria-hidden="true"></div>
+          <div class="mt-tempo">
+            <button id="mt-minus" type="button" class="tp" aria-label="Медленнее">−</button>
+            <input id="mt-bpm" type="number" min="30" max="300" step="1" aria-label="Темп, ударов в минуту" />
+            <button id="mt-plus" type="button" class="tp" aria-label="Быстрее">+</button>
+            <span class="note">уд/мин</span>
+            <button id="mt-tap" type="button" class="btn ghost">Тап</button>
+          </div>
+          <input id="mt-bpm-r" type="range" min="30" max="300" step="1" aria-label="Темп" />
+          <div class="st-row">
+            <label class="field"><span>Долей в такте</span>
+              <select id="mt-beats">
+                <option value="1">без акцента</option><option>2</option><option>3</option><option>4</option><option>5</option><option>6</option><option>7</option><option>8</option>
+              </select>
+            </label>
+            <label class="field"><span>Дробление</span>
+              <select id="mt-sub">
+                <option value="1">нет</option><option value="2">на 2</option><option value="3">триоли</option><option value="4">на 4</option>
+              </select>
+            </label>
+          </div>
+          <label class="field"><span>Громкость</span><input id="mt-vol" type="range" min="0" max="100" step="1" /></label>
+          <button id="mt-play" type="button" class="btn">Старт</button>
+        </div>
+      </dialog>
       <dialog id="tuner" class="settings" aria-labelledby="tn-title">
         <form method="dialog">
           <h2 id="tn-title">Настройка гитары</h2>
@@ -384,6 +413,7 @@
             <button id="wv-stop" class="tp" title="Стоп: к маркеру" aria-label="Стоп"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 3.5h9v9h-9z"/></svg></button>
             <button id="wv-rec" class="tp tp-rec" title="Запись (R), пробел — стоп" aria-label="Запись" aria-pressed="false" disabled><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5"/></svg></button>
             <button id="wv-end" class="tp" title="К концу (End)" aria-label="К концу"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 2.5v11L10 8zM11 2.5h2v11h-2z"/></svg></button>
+            <button id="mt-btn" class="tp" title="Метроном (M)" aria-label="Метроном" aria-pressed="false"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6 1.5h4l2.6 13H3.4zM7.2 3l-1.4 7h1.7l3.2-5.2-.4-1.8zM8.9 10h1.3l-.5-2.6z" fill-rule="evenodd"/></svg></button>
             <b id="wv-time" class="mono wv-time">0:00.000</b>
             <div class="level wv-level" title="Уровень входа"><i id="wv-level"></i></div>
           </div>
@@ -405,7 +435,7 @@
             <span><kbd>Shift</kbd> + колесо — прокрутка по записи</span>
             <span><kbd>⌥</kbd> + колесо — масштаб по высоте (волны или нот под курсором); увеличенное листает колесо или средняя кнопка</span>
             <span>Клик — маркер, <kbd>Пробел</kbd> — играть / пауза, во время записи — стоп</span>
-            <span><kbd>R</kbd> — запись, <kbd>Home</kbd> / <kbd>End</kbd> — к началу / к концу</span>
+            <span><kbd>R</kbd> — запись, <kbd>Home</kbd> / <kbd>End</kbd> — к началу / к концу, <kbd>M</kbd> — метроном</span>
             <span>Протяжка по пустому месту или <kbd>Shift</kbd> + протяжка — выделение</span>
             <span>Перетаскивание кусочка — перемещение (по сетке, на другую дорожку; к нижнему краю — новая дорожка), <kbd>⌥</kbd> — копия</span>
             <span><kbd>S</kbd> — разрезать по маркеру, <kbd>Del</kbd> — удалить кусочек, <kbd>⌘Z</kbd> — отменить</span>

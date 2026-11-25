@@ -594,3 +594,26 @@ kbd {
 .tn-strings .ok b { color: var(--good); }
 .tn-strings .on { background: var(--line); }
 .tn-strings [aria-pressed="true"] { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* ---------- metronome: a floating panel beside the timeline ---------- */
+.mt { position: fixed; inset: auto 16px 16px auto; margin: 0; width: min(330px, calc(100vw - 32px)); z-index: 30; }
+.mt-body { display: grid; gap: 12px; padding: 16px 18px; }
+.mt-head { display: flex; justify-content: space-between; align-items: center; }
+.mt-dots { display: flex; gap: 8px; }
+.mt-dots i { flex: 1; height: 12px; border-radius: 6px; background: var(--line); }
+.mt-dots i.on { background: var(--seg-wrist); }
+.mt-dots i.on:first-child { background: var(--accent); }
+.mt-tempo { display: flex; align-items: center; gap: 8px; }
+.mt-tempo input {
+  width: 4.2ch;
+  box-sizing: content-box;
+  font: 500 1.5rem var(--font-mono);
+  color: var(--ink);
+  background: none;
+  border: 0;
+  padding: 2px 4px;
+  text-align: center;
+  appearance: textfield;
+}
+.mt-tempo input::-webkit-inner-spin-button { appearance: none; }
+.mt-tempo .btn { margin-left: auto; }
