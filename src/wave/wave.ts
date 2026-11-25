@@ -58,6 +58,9 @@ interface Settings {
   /** 20 dB decay limits per string, the 6th first. */
   pmLimsMs: number[];
   attLimMs: number;
+  /** Delay compensation of recordings made to the metronome: by what the browser reports, or latMs. */
+  latAuto: boolean;
+  latMs: number | null;
   /** Checks switched off in the exercises. */
   checksOff: Check[];
   /** A note this many dB louder or quieter than its neighbours on the string is uneven. */
@@ -92,6 +95,8 @@ function loadSettings(): Settings {
     lgStrict: "normal",
     pmLimsMs: [...PM_LIMITS_MS],
     attLimMs: 70,
+    latAuto: true,
+    latMs: null,
     checksOff: [],
     loudTolDb: 2.5,
     bpm: 120,
@@ -553,10 +558,13 @@ const ICON = {
 };
 
 /** From a sound being scheduled to the player's answer to it arriving, as far as the browser knows, s. */
-function roundTrip() {
+function browserLatency() {
   const input = (stream?.getAudioTracks()[0]?.getSettings() as { latency?: number } | undefined)?.latency ?? 0;
   return (ctx?.outputLatency || ctx?.baseLatency || 0) + input;
 }
+
+/** The delay compensated for. */
+const latencyMs = () => (settings.latAuto ? browserLatency() * 1000 : (settings.latMs ?? Math.round(browserLatency() * 1000)));
 
 function setRecording(on: boolean) {
   if (on === recording) return;
@@ -572,7 +580,7 @@ function setRecording(on: boolean) {
     const now = ctx.currentTime;
     const clicks = clicksToRecording();
     const at = clicks ? now + REC_LEAD_S : now;
-    rec = { take, clip: tl.addClip(take, 0, 0, pos, lane), at, keepFrom: clicks ? at + roundTrip() : 0 };
+    rec = { take, clip: tl.addClip(take, 0, 0, pos, lane), at, keepFrom: clicks ? at + latencyMs() / 1000 : 0 };
     selClip = rec.clip;
     selection = null;
     follow = true;
@@ -1616,6 +1624,16 @@ const FIELDS: Field[] = [
   { id: "st-mon", get: () => settings.monOn, set: (v) => (settings.monOn = v as boolean) },
   { id: "st-bpm", get: () => String(settings.bpm), set: (v) => (settings.bpm = Math.min(300, Math.max(30, Number(v) || 120))) },
   { id: "st-grid", get: () => settings.grid, set: (v) => (settings.grid = v as GridDiv) },
+  {
+    id: "st-latauto",
+    get: () => settings.latAuto,
+    set: (v) => {
+      // By hand from what it was.
+      if (!v) settings.latMs ??= Math.round(browserLatency() * 1000);
+      settings.latAuto = v as boolean;
+    },
+  },
+  { id: "st-lat", get: () => String(Math.round(latencyMs())), set: (v) => (settings.latMs = Number(v)), fmt: (v) => `${v} мс` },
   { id: "st-loudtol", get: () => String(settings.loudTolDb), set: (v) => (settings.loudTolDb = Number(v)), fmt: (v) => fmtTol(Number(v)) },
   { id: "st-attlim", get: () => String(settings.attLimMs), set: (v) => (settings.attLimMs = Number(v)), fmt: (v) => `${v} мс` },
 ];
@@ -1628,6 +1646,10 @@ function fillSettings() {
     else el.value = v as string;
     if (f.fmt) $(`${f.id}-v`).textContent = f.fmt(el.value);
   }
+  $<HTMLInputElement>("st-lat").disabled = settings.latAuto;
+  $("st-latinfo").textContent = !ctx || !stream
+    ? "Браузер сообщит задержку после включения входа."
+    : `Браузер сообщает ${Math.round(browserLatency() * 1000)} мс.`;
   $<HTMLInputElement>("st-target").disabled = !settings.autoInGain;
   $<HTMLInputElement>("st-gatemargin").disabled = !settings.gateOn;
   node?.port.postMessage({ gate: settings.gateOn, gateMarginDb: settings.gateMarginDb });

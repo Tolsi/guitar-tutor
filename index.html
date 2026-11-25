@@ -358,6 +358,13 @@
             <label class="check"><input id="st-mon" type="checkbox" /> Звук в наушники при включении входа</label>
           </fieldset>
           <fieldset>
+            <legend>Задержка записи</legend>
+            <label class="check"><input id="st-latauto" type="checkbox" /> Компенсировать автоматически</label>
+            <p id="st-latinfo" class="note mono"></p>
+            <label class="field"><span>Компенсация <b id="st-lat-v" class="mono"></b></span><input id="st-lat" type="range" min="0" max="400" step="1" /></label>
+            <p class="note">Действует при записи под метроном: звук сдвигается раньше на это время. Если ноты, сыгранные точно по щелчку, ложатся правее линий сетки — прибавьте, левее — убавьте.</p>
+          </fieldset>
+          <fieldset>
             <legend>Вид и сетка</legend>
             <label class="check"><input id="st-autoheight" type="checkbox" /> Автомасштаб волны по высоте (по самому громкому звуку записи)</label>
             <div class="st-row">
