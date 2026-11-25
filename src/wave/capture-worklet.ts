@@ -5,6 +5,7 @@
 export {};
 
 declare const sampleRate: number;
+declare const currentTime: number;
 declare class AudioWorkletProcessor {
   readonly port: MessagePort;
 }
@@ -144,15 +145,18 @@ class Tap extends AudioWorkletProcessor {
   private wet = new Float32Array(BLOCK);
   private dry = new Float32Array(BLOCK);
   private n = 0;
+  /** Audio clock at the block's first sample. */
+  private t = 0;
 
   process(inputs: Float32Array[][]) {
     const w = inputs[0]?.[0], d = inputs[1]?.[0];
     const len = w?.length ?? d?.length ?? 128;
+    if (this.n === 0) this.t = currentTime;
     for (let i = 0; i < len; i++) {
       this.wet[this.n] = w ? w[i] : 0;
       this.dry[this.n] = d ? d[i] : 0;
       if (++this.n === BLOCK) {
-        this.port.postMessage({ wet: this.wet, dry: this.dry }, [this.wet.buffer, this.dry.buffer]);
+        this.port.postMessage({ wet: this.wet, dry: this.dry, t: this.t }, [this.wet.buffer, this.dry.buffer]);
         this.wet = new Float32Array(BLOCK);
         this.dry = new Float32Array(BLOCK);
         this.n = 0;

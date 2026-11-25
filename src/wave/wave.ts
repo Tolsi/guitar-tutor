@@ -3,7 +3,7 @@ import { SampleStore } from "./store";
 import type { ChannelMode } from "./capture-worklet";
 import { PM_LIMITS_MS, checkPitches, isPalmMuted, noteOf, pmLimitFor, stringOf, type PitchCheck, type PmNote } from "./pm";
 import { AMPS, MONITOR_DEFAULTS, Monitor, type DistType, type MonitorSettings } from "./monitor";
-import { BPM_MAX, BPM_MIN, initMetronome, pokeMetronome, showMetronomeBpm, stopMetronome, toggleMetronome } from "./metronome";
+import { BPM_MAX, BPM_MIN, clicksToRecording, initMetronome, pokeMetronome, showMetronomeBpm, stopMetronome, toggleMetronome } from "./metronome";
 import { findExtra, type Extra } from "./extra";
 import { SPEC_HI, SPEC_LO, specPos } from "./spectro";
 import { feedTuner, initTuner } from "./tuner";
@@ -148,7 +148,13 @@ let sr = 48000;
 let visible = false;
 let recording = false;
 /** The take being recorded and its clip. */
-let rec: { take: Take; clip: Clip } | null = null;
+/**
+ * `at`: audio clock when the timeline passes the clip's start. `keepFrom`: the clock from which sound is kept:
+ * later by the way out to the ears and back in, so what is played on a click lands on its place on the grid.
+ */
+let rec: { take: Take; clip: Clip; at: number; keepFrom: number } | null = null;
+/** Time for the click on the very first beat to be scheduled, s. */
+const REC_LEAD_S = 0.05;
 /** Keep the right edge of the view on the recording head. */
 let follow = true;
 let viewStart = 0;
@@ -298,8 +304,14 @@ function setInGain(db: number) {
  * Recorded blocks: the processed signal (after all effects) is what is shown, played and saved; the clean
  * guitar beside it is what the exercise analysis listens to (distortion flattens attacks and pitch).
  */
-function onTapBlock(wet: Float32Array, dry: Float32Array) {
+function onTapBlock(wet: Float32Array, dry: Float32Array, t: number) {
   if (!recording || !rec) return;
+  const skip = Math.round((rec.keepFrom - t) * sr);
+  if (skip >= wet.length) return;
+  if (skip > 0) {
+    wet = wet.subarray(skip);
+    dry = dry.subarray(skip);
+  }
   rec.take.store.push(wet);
   rec.take.dry?.push(dry);
   rec.clip.to = rec.take.store.length;
@@ -340,7 +352,7 @@ async function ensureCtx() {
     channelCountMode: "explicit",
     channelInterpretation: "discrete",
   });
-  tap.port.onmessage = (e: MessageEvent<{ wet: Float32Array; dry: Float32Array }>) => onTapBlock(e.data.wet, e.data.dry);
+  tap.port.onmessage = (e: MessageEvent<{ wet: Float32Array; dry: Float32Array; t: number }>) => onTapBlock(e.data.wet, e.data.dry, e.data.t);
   const mute = c.createGain();
   mute.gain.value = 0;
   tap.connect(mute).connect(c.destination);
@@ -540,6 +552,12 @@ const ICON = {
   pause: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 2.5h3v11h-3zM9.5 2.5h3v11h-3z"/></svg>',
 };
 
+/** From a sound being scheduled to the player's answer to it arriving, as far as the browser knows, s. */
+function roundTrip() {
+  const input = (stream?.getAudioTracks()[0]?.getSettings() as { latency?: number } | undefined)?.latency ?? 0;
+  return (ctx?.outputLatency || ctx?.baseLatency || 0) + input;
+}
+
 function setRecording(on: boolean) {
   if (on === recording) return;
   if (on) {
@@ -551,7 +569,10 @@ function setRecording(on: boolean) {
     const lane = tl.freeLane(pos, Infinity);
     const take = tl.newTake(`Дубль ${tl.takeCount + 1}`, new SampleStore(), new SampleStore());
     tl.checkpoint();
-    rec = { take, clip: tl.addClip(take, 0, 0, pos, lane) };
+    const now = ctx.currentTime;
+    const clicks = clicksToRecording();
+    const at = clicks ? now + REC_LEAD_S : now;
+    rec = { take, clip: tl.addClip(take, 0, 0, pos, lane), at, keepFrom: clicks ? at + roundTrip() : 0 };
     selClip = rec.clip;
     selection = null;
     follow = true;
@@ -562,6 +583,7 @@ function setRecording(on: boolean) {
     rec = null;
   }
   recording = on;
+  if (on) pokeMetronome();
   $("wv-rec").classList.toggle("on", on);
   $("wv-rec").setAttribute("aria-pressed", String(on));
   clampView();
@@ -1570,8 +1592,8 @@ $("wv-ingain-reset").addEventListener("click", () => {
 });
 
 initMetronome({ audio: ensureCtx, bpm: () => settings.bpm, setBpm, running: () => {
-  const key = play ?? rec;
-  return key && { key, pos: play ? playPos() : null, playing: !!play, recording: !!rec };
+  if (play) return { key: play, pos: playPos() ?? 0, playing: true, recording: false };
+  return rec && { key: rec, pos: rec.clip.pos / sr + (ctx!.currentTime - rec.at), playing: false, recording: true };
 } });
 initTuner({ inputOn: () => !!node, openInput: () => void openInput() });
 

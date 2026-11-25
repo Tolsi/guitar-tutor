@@ -32,8 +32,8 @@ interface Host {
   audio: () => Promise<AudioContext>;
   bpm: () => number;
   setBpm: (v: number) => void;
-  /** What is playing or being recorded, if anything; `pos`: timeline time playing now, s (null when recording). */
-  running: () => { key: object; pos: number | null; playing: boolean; recording: boolean } | null;
+  /** What is playing or being recorded, if anything; `pos`: timeline time now, s (before the start of a recording about to begin). */
+  running: () => { key: object; pos: number; playing: boolean; recording: boolean } | null;
 }
 let host: Host;
 
@@ -76,34 +76,37 @@ function newRun() {
   nextAt = ctx!.currentTime + 0.06;
 }
 
-/** Unless it always plays: the run being clicked to. */
+/** The playback or recording being clicked to, and the tempo it was put on the grid at. */
 let runKey: object | null = null;
+let runBpm = 0;
 
-/** Follows the transport; false while there is nothing to click to. */
+/** Keeps to the grid of what is playing or being recorded; false while there is nothing to click to. */
 function followTransport(): boolean {
-  if (settings.always) {
-    runKey = null;
-    return true;
-  }
   const now = host.running();
-  const run = now && ((now.playing && settings.onPlay) || (now.recording && settings.onRec)) ? now : null;
-  if (run?.key === runKey && run) return true;
-  runKey = run?.key ?? null;
-  newRun();
-  lit = -1;
+  const run = now && (settings.always || (now.playing && settings.onPlay) || (now.recording && settings.onRec)) ? now : null;
   if (!run) {
-    nextAt = 0;
-    return false;
+    if (runKey && !settings.always) {
+      newRun();
+      lit = -1;
+    }
+    runKey = null;
+    return settings.always;
   }
-  if (run.pos !== null) {
-    // On the grid of the timeline: the next beat, or the one that has only just begun.
-    const len = 60 / host.bpm();
-    const k = Math.ceil((run.pos - 0.02) / len - 1e-6);
-    nextAt = ctx!.currentTime + Math.max(0, k * len - run.pos);
-    beat = k % settings.beats;
-  }
+  const bpm = host.bpm();
+  if (run.key === runKey && bpm === runBpm) return true;
+  runKey = run.key;
+  runBpm = bpm;
+  newRun();
+  // The next beat of the grid, or the one that has only just begun.
+  const len = 60 / bpm;
+  const k = Math.max(0, Math.ceil((run.pos - 0.02) / len - 1e-6));
+  nextAt = ctx!.currentTime + Math.max(0, k * len - run.pos);
+  beat = k % settings.beats;
   return true;
 }
+
+/** Whether a recording started now would be clicked to. */
+export const clicksToRecording = () => timer !== 0 && (settings.always || settings.onRec);
 
 function schedule() {
   if (!ctx) return;
