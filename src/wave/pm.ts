@@ -1007,8 +1007,10 @@ export const isPalmMuted = (n: PmNote, limits: number[]) => (n.t20 === null ? nu
 export interface PitchCheck {
   /** Index into OPEN_STRINGS. */
   string: number;
+  /** 0 for the open string. */
+  fret: number;
   name: string;
-  /** Deviation from the open string, cents. */
+  /** Deviation from the open string (or its fret), cents. */
   cents: number;
   /** The reference came from open notes actually played on that string (rather than standard tuning). */
   measuredRef: boolean;
@@ -1025,20 +1027,16 @@ export function noteOf(f: number, a4 = 440) {
 }
 
 /**
- * Compares each note's pitch with the open string it belongs to. The reference is the median pitch of
- * the open (not muted) notes played on that string, so a guitar tuned a little off is not penalised.
+ * Compares each note's pitch with the string it belongs to: the highest one whose open note is not above it
+ * (3 semitones over the 4th string is its 3rd fret, not the 3rd string 2 semitones flat). The reference is
+ * the median pitch of the open (not muted) notes played on that string, so a guitar tuned a little off is
+ * not penalised; for a fretted note, that many semitones over it.
  */
 export function checkPitches(notes: PmNote[], limits: number[], a4 = 440): Map<PmNote, PitchCheck> {
-  const nearest = (f: number) => {
-    const m = midiOf(f, a4);
-    let bi = 0;
-    for (let i = 1; i < OPEN_STRINGS.length; i++) if (Math.abs(m - OPEN_STRINGS[i]) < Math.abs(m - OPEN_STRINGS[bi])) bi = i;
-    return bi;
-  };
   const refs: number[][] = OPEN_STRINGS.map(() => []);
   for (const n of notes) {
     if (n.f0 === null || isPalmMuted(n, limits) !== false) continue;
-    const i = nearest(n.f0);
+    const i = stringOf(n.f0);
     if (Math.abs(midiOf(n.f0, a4) - OPEN_STRINGS[i]) < 0.6) refs[i].push(n.f0);
   }
   const ref = refs.map((r, i) => {
@@ -1049,8 +1047,10 @@ export function checkPitches(notes: PmNote[], limits: number[], a4 = 440): Map<P
   const out = new Map<PmNote, PitchCheck>();
   for (const n of notes) {
     if (n.f0 === null) continue;
-    const i = nearest(n.f0);
-    out.set(n, { string: i, name: STRING_NAMES[i], cents: 1200 * Math.log2(n.f0 / ref[i].f), measuredRef: ref[i].measured });
+    const i = stringOf(n.f0);
+    const cents = 1200 * Math.log2(n.f0 / ref[i].f);
+    const fret = Math.max(0, Math.round(cents / 100));
+    out.set(n, { string: i, fret, name: STRING_NAMES[i] + (fret ? `, ${fret} лад` : ""), cents: cents - fret * 100, measuredRef: ref[i].measured });
   }
   return out;
 }

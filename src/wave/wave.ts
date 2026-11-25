@@ -2144,7 +2144,7 @@ function renderPm() {
         const t = clip ? (clip.pos + n.start - clip.from) / sr : n.start / sr;
         const m = Math.floor(t / 60);
         const pitch =
-          fmtNote(n) + (pitchEx() && j.pitch ? ` (от ${j.pitch.name.split(" ")[0]} ${fmtCents(j.pitch.cents)})` : "") + " · ";
+          fmtNote(n) + (pitchEx() && j.pitch ? ` (от ${j.pitch.name.split(" ")[0]}${j.pitch.fret ? ` + ${j.pitch.fret} лад` : ""} ${fmtCents(j.pitch.cents)})` : "") + " · ";
         b.innerHTML =
           `<b>${!checked("mute") && j.state !== "wait" ? NEUTRAL[j.state] : j.state === "wait" ? "…" : STATE_SHORT[j.state] === "PM" ? "Palm mute" : STATE_SHORT[j.state] === "откр." ? "Открытая" : STATE_SHORT[j.state]}</b>` +
           `<span>${m}:${(t - m * 60).toFixed(2).padStart(5, "0")} · ${fmtT20(n)}</span>` +
