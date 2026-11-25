@@ -250,6 +250,7 @@
           <button class="menu-top" role="menuitem" aria-haspopup="true" aria-expanded="false">Вид</button>
           <div class="menu-pop" role="menu">
             <button role="menuitemcheckbox" data-view="wave" aria-checked="true">Звуковая волна</button>
+            <button role="menuitemcheckbox" data-view="spec" aria-checked="false">Спектрограмма</button>
             <button role="menuitemcheckbox" data-view="pitch" aria-checked="false">Высота нот</button>
             <button role="menuitemcheckbox" data-view="loud" aria-checked="false">Громкость нот</button>
             <hr />
@@ -305,6 +306,7 @@
             </label>
           </div>
           <label class="field"><span>Громкость</span><input id="mt-vol" type="range" min="0" max="100" step="1" /></label>
+          <label class="check"><input id="mt-transport" type="checkbox" /> Только при проигрывании или записи</label>
           <button id="mt-play" type="button" class="btn">Старт</button>
         </div>
       </dialog>
@@ -468,6 +470,7 @@
               <div><span>Чистая атака</span><b id="pm-att-ok" class="mono">—</b><small>одна, не дольше границы</small></div>
               <div><span>Громкость нот</span><b id="pm-loud" class="mono">—</b><small id="pm-loud-range">медиана</small></div>
               <div><span>Ровных по громкости</span><b id="pm-even" class="mono">—</b><small id="pm-even-tol"></small></div>
+              <div><span>Лишних звуков</span><b id="pm-extras" class="mono">0</b></div>
               <div><span>Двойных атак</span><b id="pm-doubles" class="mono">0</b></div>
             </div>
           </div>
@@ -495,7 +498,7 @@
             Атака — от касания медиатором струны (первый шорох) до момента, когда нота зазвучала: чем короче, тем чётче удар.
             Двойная атака — медиатор задел струну дважды подряд (два щелчка в пределах ~80 мс): звучит как «флэм» и смазывает ритм.
             Если приглушение слабое, нота звенит дольше границы — двиньте ладонь ближе к грифу или прижмите сильнее; если нота глохнет без высоты, ладонь слишком далеко от подставки.
-            Громкость ноты сравнивается с четырьмя ближайшими на той же струне (не дальше 5 с); если соседей меньше трёх, нота не оценивается. Нажмите на ноту в списке, чтобы перейти к ней на волне.
+            Лишний звук — то, чего нет у таких же приглушённых нот дубля (той же высоты, нужно хотя бы три): зазвучавшая соседняя струна, скрип, стук. Громкость ноты сравнивается с четырьмя ближайшими на той же струне (не дальше 5 с); если соседей меньше трёх, нота не оценивается. Нажмите на ноту в списке, чтобы перейти к ней на волне.
           </p>
         </section>
 

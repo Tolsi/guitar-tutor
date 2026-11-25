@@ -3,7 +3,9 @@ import { SampleStore } from "./store";
 import type { ChannelMode } from "./capture-worklet";
 import { PM_LIMITS_MS, checkPitches, isPalmMuted, noteOf, pmLimitFor, stringOf, type PitchCheck, type PmNote } from "./pm";
 import { AMPS, MONITOR_DEFAULTS, Monitor, type DistType, type MonitorSettings } from "./monitor";
-import { BPM_MAX, BPM_MIN, initMetronome, showMetronomeBpm, stopMetronome, toggleMetronome } from "./metronome";
+import { BPM_MAX, BPM_MIN, initMetronome, pokeMetronome, showMetronomeBpm, stopMetronome, toggleMetronome } from "./metronome";
+import { findExtra, type Extra } from "./extra";
+import { SPEC_HI, SPEC_LO, specPos } from "./spectro";
 import { feedTuner, initTuner } from "./tuner";
 import { loudness, loudSummary, type LoudNote } from "./loudness";
 import { ISSUE_LABEL, LIMITS, noteName, summarize, type IssueKind, type Note, type Strictness } from "../legato/notes";
@@ -23,13 +25,14 @@ const CHECKS = {
   double: "двойная атака",
   tune: "строй ноты",
   loud: "ровность громкости",
+  extra: "лишние звуки",
   lgWobble: "отклонение",
   lgStart: "начало ноты (пережим, подъезд, завышение)",
   lgDrift: "уплывание",
   lgTune: "строй ноты",
 } as const;
 type Check = keyof typeof CHECKS;
-const PM_CHECKS: Check[] = ["mute", "pitch", "attack", "double", "tune", "loud"];
+const PM_CHECKS: Check[] = ["mute", "pitch", "attack", "double", "tune", "loud", "extra"];
 const LG_CHECKS: Check[] = ["lgWobble", "lgStart", "lgDrift", "lgTune"];
 const LG_ISSUES: Partial<Record<Check, IssueKind[]>> = {
   lgWobble: ["wobble"],
@@ -46,10 +49,11 @@ interface Settings {
   /** Headphone monitoring through the amp; also used for playback. */
   monOn: boolean;
   exercise: "free" | "pm" | "pmopen" | "legato";
-  /** What the timeline shows: the waveform, the pitch and the loudness of the notes, in any mix (never nothing). */
+  /** What the timeline shows: the waveform, the spectrogram, the pitch and the loudness of the notes, in any mix (never nothing). */
   showWave: boolean;
   showPitch: boolean;
   showLoud: boolean;
+  showSpec: boolean;
   lgStrict: Strictness;
   /** 20 dB decay limits per string, the 6th first. */
   pmLimsMs: number[];
@@ -84,6 +88,7 @@ function loadSettings(): Settings {
     showWave: true,
     showPitch: false,
     showLoud: false,
+    showSpec: false,
     lgStrict: "normal",
     pmLimsMs: [...PM_LIMITS_MS],
     attLimMs: 70,
@@ -635,6 +640,7 @@ function togglePlay() {
   void ctx.resume();
   src.start();
   play = { src, from, at: ctx.currentTime };
+  pokeMetronome();
   $("wv-play").innerHTML = ICON.pause;
   $("wv-play").classList.add("on");
 }
@@ -892,6 +898,7 @@ function drawWave() {
       const x0 = xOf(c.pos / sr), x1 = xOf(clipEnd(c) / sr);
       if (x1 < 0 || x0 > W) continue;
       drawClip(g, c, x0, x1, top + c.lane * laneH, laneH, W, dpr);
+      if (settings.showSpec) drawSpec(g, W, top + c.lane * laneH, mainH, dpr, xOf, c);
       if (pitchView()) drawPitch(g, W, top + c.lane * laneH, mainH, dpr, xOf, c);
       if (settings.showLoud) drawLoud(g, W, top + c.lane * laneH, laneH, dpr, xOf, c, loudOf(c.take));
       if (settings.showWave && pmEx()) {
@@ -1129,10 +1136,18 @@ function loop() {
   if (!visible) return;
   renderTime();
   if ((pmEx() || (settings.showLoud && !lgEx())) && tl) {
-    for (const t of tl.takes) t.pm.update(t.dry ?? t.store);
+    for (const t of tl.takes) {
+      t.pm.update(t.dry ?? t.store);
+      if (pmEx()) findExtras(t);
+    }
     const ft = focusTake();
     const key = ft ? `${ft.id}:${ft.pm.version}` : "";
     if (pmEx() && key !== pmKey) renderPm();
+  }
+  if (settings.showSpec && tl) {
+    const deadline = performance.now() + 8;
+    const ft = focusTake();
+    for (const t of [...(ft ? [ft] : []), ...tl.takes.filter((t) => t !== ft)]) t.spec.update(t.store, deadline);
   }
   if ((pitchView() || lgEx()) && tl) {
     // The take on screen first; a long import is worked through a little per frame.
@@ -1499,12 +1514,12 @@ $("vw-auto").addEventListener("click", () => {
   saveSettings();
   renderViewMenu();
 });
-type View = "wave" | "pitch" | "loud";
-const VIEW_KEY = { wave: "showWave", pitch: "showPitch", loud: "showLoud" } as const;
+type View = "wave" | "pitch" | "loud" | "spec";
+const VIEW_KEY = { wave: "showWave", pitch: "showPitch", loud: "showLoud", spec: "showSpec" } as const;
 function toggleView(v: View) {
   settings[VIEW_KEY[v]] = !settings[VIEW_KEY[v]];
   // Something must stay on screen: turning off the only view switches to another one.
-  if (!settings.showWave && !settings.showPitch && !settings.showLoud) settings[v === "wave" ? "showPitch" : "showWave"] = true;
+  if (!settings.showWave && !settings.showPitch && !settings.showLoud && !settings.showSpec) settings[v === "wave" ? "showPitch" : "showWave"] = true;
   saveSettings();
   renderViewMenu();
 }
@@ -1554,7 +1569,10 @@ $("wv-ingain-reset").addEventListener("click", () => {
   if (dlg.open) fillSettings();
 });
 
-initMetronome({ audio: ensureCtx, bpm: () => settings.bpm, setBpm });
+initMetronome({ audio: ensureCtx, bpm: () => settings.bpm, setBpm, running: () => {
+  if (play) return { key: play, pos: playPos() };
+  return rec ? { key: rec, pos: null } : null;
+} });
 initTuner({ inputOn: () => !!node, openInput: () => void openInput() });
 
 // ---------- settings dialog ----------
@@ -1831,6 +1849,25 @@ interface PmVerdict {
   detune: number | null;
   /** dB off the neighbours on the same string, when beyond the tolerance. */
   uneven: number | null;
+  /** A sound the same notes elsewhere do not have. */
+  extra: Extra | null;
+}
+
+const extraOf = new WeakMap<PmNote, Extra>();
+const extraKeys = new WeakMap<Take, string>();
+/** Looks for extra sounds in the take's muted notes when it has new ones. */
+function findExtras(take: Take) {
+  const notes = take.pm.notes;
+  const key = `${notes.length}:${notes.at(-1)?.done}:${Math.floor(take.pm.frames / 100)}:${take === rec?.take}:${settings.pmLimsMs}`;
+  if (extraKeys.get(take) === key) return;
+  extraKeys.set(take, key);
+  const found = findExtra(take.pm, (n) => isPalmMuted(n, pmLimits()) === true);
+  for (const n of notes) {
+    const e = found.get(n);
+    if (e) extraOf.set(n, e);
+    else extraOf.delete(n);
+  }
+  take.pm.version++;
 }
 
 const checked = (c: Check) => !settings.checksOff.includes(c);
@@ -1854,7 +1891,8 @@ function judgePm(n: PmNote, checks: Map<PmNote, PitchCheck>, loudAt: LoudAt): Pm
   const cents = n.f0 === null ? null : noteOf(n.f0).cents;
   const detune = checked("tune") && cents !== null && Math.abs(cents) > TUNE_TOL ? cents : null;
   const uneven = unevenBy(loudAt.get(n.start / sr));
-  const v = (state: PmState): PmVerdict => ({ state, pitch, slowAttack, double, detune, uneven });
+  const extra = (checked("extra") && extraOf.get(n)) || null;
+  const v = (state: PmState): PmVerdict => ({ state, pitch, slowAttack, double, detune, uneven, extra });
   if (muted === null) return v("wait");
   if (!muted && checked("mute")) return v("open");
   // The pitch is measured 15–60 ms after the attack; until then the note is still pending.
@@ -1870,13 +1908,15 @@ const attackIssues = (n: PmNote, v: PmVerdict) => {
   if (v.slowAttack) out.push(`Атака ${fmtAtt(n.attack)} — дольше ${settings.attLimMs} мс: медиатор задерживается на струне. Меньше погружайте медиатор и не дожимайте струну перед ударом.`);
   if (v.uneven !== null)
     out.push(`Нота ${v.uneven > 0 ? "громче" : "тише"} соседних на той же струне на ${fmtLevel(Math.abs(v.uneven))} дБ: держите одну силу удара и одинаковый нажим ладони.`);
+  if (v.extra)
+    out.push(`Лишний звук через ${Math.round(v.extra.at * 1000)} мс после удара, ${Math.round(v.extra.length * 1000)} мс, на ${Math.round(v.extra.db)} дБ громче, чем у таких же нот: глушите соседние струны, не задевайте их и не отрывайте ладонь.`);
   if (v.detune !== null)
     out.push(`Нота ${fmtNote(n)} — дальше ${TUNE_TOL} центов от строя: подстройте струну, а если открытая струна строит — не давите на неё ладонью.`);
   return out;
 };
 const cleanAttack = (v: PmVerdict) => !v.double && !v.slowAttack;
 /** No problem of any kind besides the mute itself. */
-const clean = (v: PmVerdict) => cleanAttack(v) && v.detune === null && v.uneven === null;
+const clean = (v: PmVerdict) => cleanAttack(v) && v.detune === null && v.uneven === null && v.extra === null;
 
 const STATE_TITLE: Record<PmState, string> = {
   wait: "Измеряю…",
@@ -1961,6 +2001,15 @@ function drawPmMarks(
     }
     let label = `${checked("mute") ? STATE_SHORT[v.state] : (v.state === "pm" ? "" : NEUTRAL[v.state].toLowerCase())} ${fmtNote(n)}${v.detune !== null && v.state !== "wait" ? "!" : ""} ${fmtT20(n)}`;
     if (v.pitch && v.state !== "wait") label += ` стр.${fmtCents(v.pitch.cents)}`;
+    if (v.extra) {
+      // Where the extra sound is.
+      const xe = xOf(t + v.extra.at);
+      g.fillStyle = col.clip;
+      g.globalAlpha = 0.28;
+      g.fillRect(xe, top, Math.max(2 * dpr, xOf(t + v.extra.at + v.extra.length) - xe), bottom - top);
+      g.globalAlpha = 1;
+      label += " лишний звук";
+    }
     if (v.double) label += " ×2";
     if (v.uneven !== null) label += ` ${fmtDiff(v.uneven)} дБ`;
     if (n.attack !== null) label += ` ат.${Math.round(n.attack * 1000)}${v.slowAttack ? "!" : ""}`;
@@ -2001,7 +2050,7 @@ function renderPm() {
       ? v.state === "pm" && (!pitchEx() || !checked("pitch")) ? "Palm mute" : STATE_TITLE[v.state]
       : NEUTRAL[v.state];
   if (v && v.state !== "wait") {
-    const extra = [v.double ? "двойная атака" : "", v.slowAttack ? "долгая атака" : "", v.detune !== null ? "нота не строит" : "", v.uneven !== null ? (v.uneven > 0 ? "громче соседних" : "тише соседних") : ""].filter(Boolean);
+    const extra = [v.double ? "двойная атака" : "", v.slowAttack ? "долгая атака" : "", v.detune !== null ? "нота не строит" : "", v.uneven !== null ? (v.uneven > 0 ? "громче соседних" : "тише соседних") : "", v.extra ? "лишний звук" : ""].filter(Boolean);
     if (extra.length) title += ` · ${extra.join(", ")}`;
   }
   $("pm-v-title").textContent = title;
@@ -2035,6 +2084,7 @@ function renderPm() {
   $("pm-att-ok").textContent = attRated.length
     ? `${Math.round((attRated.filter(([, j]) => cleanAttack(j)).length / attRated.length) * 100)}%`
     : "—";
+  $("pm-extras").textContent = String(rated.filter(([, j]) => j.extra).length);
   $("pm-doubles").textContent = String(rated.filter(([, j]) => j.double).length);
 
   const list = $("pm-list");
@@ -2057,6 +2107,7 @@ function renderPm() {
           `<span>${pitch}атака ${fmtAtt(n.attack)}${j.slowAttack ? " !" : ""}</span>` +
           (j.uneven !== null ? `<span class="pm-bad">${j.uneven > 0 ? "громче" : "тише"} соседних</span>` : "") +
           (loudAt.has(n.start / sr) ? `<span>громкость ${fmtLoud(loudAt.get(n.start / sr)!)}</span>` : "") +
+          (j.extra ? `<span class="pm-bad">лишний звук, +${Math.round(j.extra.at * 1000)} мс</span>` : "") +
           (j.double ? `<span class="pm-bad">двойная атака, ${Math.round(n.doubleGap! * 1000)} мс</span>` : "") +
           (j.detune !== null && j.state !== "wait" ? `<span class="pm-bad">не строит, ${fmtCents(j.detune)}</span>` : "");
         b.disabled = !clip;
@@ -2082,6 +2133,7 @@ function applyExercise() {
   tile("pm-att-ok", checked("attack") || checked("double"));
   tile("pm-doubles", checked("double"));
   tile("pm-even", checked("loud"));
+  tile("pm-extras", checked("extra"));
   for (const el of document.querySelectorAll<HTMLElement>("[data-check]")) {
     const c = el.dataset.check as Check;
     el.querySelector("input")!.checked = checked(c);
@@ -2113,7 +2165,10 @@ function applyExercise() {
 const pitchView = () => settings.showPitch;
 /** With both views on, the wave takes this share of a lane, above the pitch. */
 const WAVE_SHARE = 0.42;
-const waveH = (laneH: number) => (!settings.showWave ? 0 : pitchView() ? Math.round(laneH * WAVE_SHARE) : laneH);
+const waveH = (laneH: number) => (!settings.showWave ? 0 : pitchView() || settings.showSpec ? Math.round(laneH * WAVE_SHARE) : laneH);
+/** The spectrogram goes between the wave and the pitch, and shares the rest evenly with the pitch. */
+const specH = (laneH: number) =>
+  !settings.showSpec ? 0 : pitchView() ? Math.round((laneH - waveH(laneH)) / 2) : laneH - waveH(laneH);
 const lgEx = () => settings.exercise === "legato";
 let wlKey = "";
 /** MIDI range of the pitch view; follows the notes on screen. */
@@ -2131,7 +2186,7 @@ function pitchAt(y: number, height: number): number | null {
   const laneH = (height - RULER) / laneCount();
   const inLane = (y - RULER) % laneH;
   const main = laneH - loudH(laneH);
-  const top = Math.max(waveH(main), main > 46 ? 16 : 2), bottom = main - 2;
+  const top = Math.max(waveH(main) + specH(main), main > 46 ? 16 : 2), bottom = main - 2;
   return inLane < top || inLane > bottom ? null : (bottom - inLane) / (bottom - top);
 }
 
@@ -2166,7 +2221,7 @@ function waveAmpPx(height: number) {
 function pitchPx(height: number) {
   const laneH = (height - RULER) / laneCount();
   const main = laneH - loudH(laneH);
-  return Math.max(1, main - 2 - Math.max(waveH(main), main > 46 ? 16 : 2));
+  return Math.max(1, main - 2 - Math.max(waveH(main) + specH(main), main > 46 ? 16 : 2));
 }
 
 /** Moves the magnified range by `semitones` within the notes' range; false when it is already at the end. */
@@ -2265,7 +2320,7 @@ function fitPitch() {
 const lgColor = (n: Note) => (n.eval ? (n.eval.clean ? col.good : col.clip) : col.wave);
 
 function drawPitch(g: CanvasRenderingContext2D, W: number, y0: number, h: number, dpr: number, xOf: (t: number) => number, c: Clip) {
-  const top = y0 + Math.max(waveH(h), h > 46 * dpr ? 16 * dpr : 2 * dpr);
+  const top = y0 + Math.max(waveH(h) + specH(h), h > 46 * dpr ? 16 * dpr : 2 * dpr);
   const bottom = y0 + h - 2 * dpr;
   const shift = (c.pos - c.from) / sr;
   const x0 = Math.max(0, xOf(c.pos / sr)), x1 = Math.min(W, xOf(clipEnd(c) / sr));
@@ -2276,7 +2331,7 @@ function drawPitch(g: CanvasRenderingContext2D, W: number, y0: number, h: number
   g.beginPath();
   g.rect(x0, top, x1 - x0, bottom - top);
   g.clip();
-  if (settings.showWave) {
+  if (settings.showWave || settings.showSpec) {
     g.fillStyle = col.axis;
     g.fillRect(x0, top, x1 - x0, dpr);
   }
@@ -2372,12 +2427,49 @@ function drawPitch(g: CanvasRenderingContext2D, W: number, y0: number, h: number
   g.restore();
 }
 
+// ---------- spectrogram ----------
+
+function drawSpec(g: CanvasRenderingContext2D, W: number, y0: number, h: number, dpr: number, xOf: (t: number) => number, c: Clip) {
+  const top = y0 + Math.max(waveH(h), h > 46 * dpr ? 16 * dpr : 2 * dpr);
+  const bottom = y0 + waveH(h) + specH(h) - (pitchView() ? 0 : 2 * dpr);
+  const x0 = Math.max(0, xOf(c.pos / sr)), x1 = Math.min(W, xOf(clipEnd(c) / sr));
+  if (x1 <= x0 || bottom <= top) return;
+  g.save();
+  g.beginPath();
+  g.rect(x0, top, x1 - x0, bottom - top);
+  g.clip();
+  const spp = (viewSpan * sr) / W;
+  const s0 = Math.max(c.from, c.from + (viewStart * sr - c.pos));
+  c.take.spec.draw(g, x0, top, bottom - top, s0, Math.min(c.to, s0 + (x1 - x0) * spp), spp);
+  g.font = `${10 * dpr}px "IBM Plex Mono", ui-monospace, monospace`;
+  g.textBaseline = "middle";
+  let last = Infinity;
+  for (const hz of [100, 200, 500, 1000, 2000, 5000]) {
+    if (hz < SPEC_LO || hz > SPEC_HI) continue;
+    const y = bottom - specPos(hz) * (bottom - top);
+    g.fillStyle = col.axis;
+    g.globalAlpha = 0.5;
+    g.fillRect(x0, Math.round(y), x1 - x0, dpr);
+    g.globalAlpha = 1;
+    if (last - y < 13 * dpr || y < top + 7 * dpr || y > bottom - 7 * dpr) continue;
+    last = y;
+    const t = hz < 1000 ? `${hz} Гц` : `${hz / 1000} кГц`;
+    g.fillStyle = col.stage;
+    g.globalAlpha = 0.7;
+    g.fillRect(x0 + 2 * dpr, y - 6 * dpr, g.measureText(t).width + 4 * dpr, 12 * dpr);
+    g.globalAlpha = 1;
+    g.fillStyle = col.text;
+    g.fillText(t, x0 + 4 * dpr, y);
+  }
+  g.restore();
+}
+
 // ---------- note loudness ----------
 
 /** Share of a lane the loudness takes under the other views; all of it when alone. */
 const LOUD_SHARE = 0.28;
 const loudH = (laneH: number) =>
-  !settings.showLoud ? 0 : settings.showWave || settings.showPitch ? Math.round(laneH * LOUD_SHARE) : laneH;
+  !settings.showLoud ? 0 : settings.showWave || settings.showPitch || settings.showSpec ? Math.round(laneH * LOUD_SHARE) : laneH;
 
 const loudOfLegato = (notes: Note[]) => loudness(notes.map((n) => ({ start: n.start, end: n.end, db: n.peakDb })));
 

@@ -629,3 +629,4 @@ kbd {
 .checks-list { display: flex; flex-wrap: wrap; gap: 4px 16px; }
 .checks .check { padding: 0; }
 .checks .check[hidden], .pm-limits [hidden], .wv-stats > [hidden] { display: none; }
+.mt .check { padding: 0; }

@@ -11,7 +11,7 @@ const AHEAD_HIDDEN_S = 1.6;
 export const BPM_MIN = 30;
 export const BPM_MAX = 300;
 
-const settings = { beats: 4, sub: 1, vol: 70 };
+const settings = { beats: 4, sub: 1, vol: 70, withTransport: false };
 try {
   Object.assign(settings, JSON.parse(localStorage.getItem(KEY) ?? "{}"));
 } catch {
@@ -29,6 +29,8 @@ interface Host {
   audio: () => Promise<AudioContext>;
   bpm: () => number;
   setBpm: (v: number) => void;
+  /** What is playing or being recorded, if anything; `pos`: timeline time playing now, s (null when recording). */
+  running: () => { key: object; pos: number | null } | null;
 }
 let host: Host;
 
@@ -60,8 +62,48 @@ function click(at: number, kind: "accent" | "beat" | "sub") {
   o.stop(at + 0.06);
 }
 
+/** A gain of its own for each run: cutting it off drops the queued clicks. */
+function newRun() {
+  out?.disconnect();
+  out = ctx!.createGain();
+  out.gain.value = gainOf(settings.vol);
+  out.connect(ctx!.destination);
+  beat = sub = 0;
+  queue = [];
+  nextAt = ctx!.currentTime + 0.06;
+}
+
+/** With the transport only: the run being clicked to. */
+let runKey: object | null = null;
+
+/** Follows the transport; false while there is nothing to click to. */
+function followTransport(): boolean {
+  if (!settings.withTransport) {
+    runKey = null;
+    return true;
+  }
+  const run = host.running();
+  if (run?.key === runKey && run) return true;
+  runKey = run?.key ?? null;
+  newRun();
+  lit = -1;
+  if (!run) {
+    nextAt = 0;
+    return false;
+  }
+  if (run.pos !== null) {
+    // On the grid of the timeline: the next beat, or the one that has only just begun.
+    const len = 60 / host.bpm();
+    const k = Math.ceil((run.pos - 0.02) / len - 1e-6);
+    nextAt = ctx!.currentTime + Math.max(0, k * len - run.pos);
+    beat = k % settings.beats;
+  }
+  return true;
+}
+
 function schedule() {
   if (!ctx) return;
+  if (!followTransport()) return;
   const now = ctx.currentTime;
   const ahead = now + (document.hidden ? AHEAD_HIDDEN_S : AHEAD_S);
   // Timers held up for long (a sleeping laptop): skip what was missed instead of firing it all at once.
@@ -92,13 +134,8 @@ async function start() {
   } finally {
     starting = false;
   }
-  // A gain of its own for each run: cutting it off on stop drops the queued clicks.
-  out = ctx.createGain();
-  out.gain.value = gainOf(settings.vol);
-  out.connect(ctx.destination);
-  beat = sub = 0;
-  queue = [];
-  nextAt = ctx.currentTime + 0.06;
+  runKey = null;
+  newRun();
   timer = window.setInterval(schedule, TICK_MS);
   schedule();
   renderState();
@@ -113,6 +150,11 @@ export function stopMetronome() {
   out = null;
   queue = [];
   renderState();
+}
+
+/** Playback or recording has just started: click along at once. */
+export function pokeMetronome() {
+  if (timer) schedule();
 }
 
 export const toggleMetronome = () => (timer ? stopMetronome() : void start());
@@ -195,6 +237,14 @@ export function initMetronome(h: Host) {
   vol.addEventListener("input", () => {
     settings.vol = Number(vol.value);
     if (out && ctx) out.gain.setTargetAtTime(gainOf(settings.vol), ctx.currentTime, 0.01);
+    save();
+  });
+  const only = $<HTMLInputElement>("mt-transport");
+  only.checked = settings.withTransport;
+  only.addEventListener("change", () => {
+    settings.withTransport = only.checked;
+    runKey = null;
+    if (timer) newRun();
     save();
   });
   renderDots();

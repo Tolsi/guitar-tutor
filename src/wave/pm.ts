@@ -61,6 +61,9 @@ const REFINE_C = 100;
 const FLUX_N = 1024;
 const FLUX_LAG = 2;
 const FLUX_TOP_HZ = 6000;
+/** Edges of the bands whose level is kept per hop, Hz: above the body of the bass notes, under the hiss. */
+const BAND_EDGES = [200, 400, 800, 1500, 2300, 5000];
+export const BANDS = BAND_EDGES.length - 1;
 /** Flux must beat FLUX_K × the recent average plus FLUX_MIN (per bin) to count as a pick hit… */
 const FLUX_K = 2;
 const FLUX_MIN = 0.01;
@@ -107,6 +110,8 @@ export class PmAnalyzer {
   /** Spectral flux per hop, and the log spectra of the last FLUX_LAG + 1 hops (ring). */
   flux = new Float32Array(1 << 14);
   private logSpec: Float32Array[] = [];
+  /** Level of each band per hop, dB: BANDS values a hop. */
+  bands = new Float32Array((1 << 14) * BANDS);
   private fftRe = new Float64Array(FLUX_N);
   private fftIm = new Float64Array(FLUX_N);
   private win = new Float64Array(FLUX_N).map((_, i) => 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (FLUX_N - 1)));
@@ -151,6 +156,9 @@ export class PmAnalyzer {
     const f = new Float32Array(this.flux.length * 2);
     f.set(this.flux);
     this.flux = f;
+    const b = new Float32Array(this.bands.length * 2);
+    b.set(this.bands);
+    this.bands = b;
     const v = new Float32Array(this.env.length * 2);
     v.set(this.env);
     this.env = v;
@@ -266,6 +274,13 @@ export class PmAnalyzer {
       im[i] = 0;
     }
     fft(re, im);
+    for (let b = 0; b < BANDS; b++) {
+      let p = 0;
+      const to = Math.round((BAND_EDGES[b + 1] * N) / this.sr);
+      for (let i = Math.round((BAND_EDGES[b] * N) / this.sr); i < to; i++) p += re[i] * re[i] + im[i] * im[i];
+      // Hann-windowed power to mean square.
+      this.bands[k * BANDS + b] = 10 * Math.log10((p * 2) / (N * N * 0.375) + 1e-12);
+    }
     const top = Math.min(N / 2, Math.round((FLUX_TOP_HZ * N) / this.sr));
     const spec = this.logSpec.length > FLUX_LAG ? this.logSpec.shift()! : new Float32Array(top);
     // Amplitude scale (Hann sum = N/2) and log compression: ≈0 for the noise, ≈1–3 for notes.
@@ -939,7 +954,7 @@ function shs(d: Float64Array, binHz: number) {
   return fc;
 }
 
-function fft(re: Float64Array, im: Float64Array) {
+export function fft(re: Float64Array, im: Float64Array) {
   const n = re.length;
   for (let i = 1, j = 0; i < n; i++) {
     let bit = n >> 1;

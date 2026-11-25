@@ -3,6 +3,7 @@
 import { SampleStore } from "./store";
 import { LegatoAnalyzer } from "./legato";
 import { PmAnalyzer } from "./pm";
+import { Spectrogram } from "./spectro";
 
 export interface Take {
   id: number;
@@ -12,6 +13,7 @@ export interface Take {
   dry?: SampleStore;
   pm: PmAnalyzer;
   lg: LegatoAnalyzer;
+  spec: Spectrogram;
 }
 
 export interface Clip {
@@ -50,7 +52,7 @@ export class Timeline {
   }
 
   newTake(name: string, store: SampleStore, dry?: SampleStore): Take {
-    const t: Take = { id: this.nextTake++, name, store, dry, pm: new PmAnalyzer(this.sr), lg: new LegatoAnalyzer(this.sr) };
+    const t: Take = { id: this.nextTake++, name, store, dry, pm: new PmAnalyzer(this.sr), lg: new LegatoAnalyzer(this.sr), spec: new Spectrogram(this.sr) };
     this.takes.push(t);
     return t;
   }
