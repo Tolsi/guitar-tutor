@@ -413,7 +413,7 @@ kbd {
 .note a { color: inherit; }
 
 /* ---------- palm mute exercise ---------- */
-.pm-top { display: flex; flex-wrap: wrap; gap: 16px 32px; align-items: center; }
+.pm-top { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr)); gap: 16px 24px; align-items: start; }
 .pm-verdict {
   display: grid;
   grid-template-columns: auto 1fr;
@@ -617,3 +617,8 @@ kbd {
 }
 .mt-tempo input::-webkit-inner-spin-button { appearance: none; }
 .mt-tempo .btn { margin-left: auto; }
+
+/* ---------- palm mute limits per string ---------- */
+.pm-strings { display: flex; flex-wrap: wrap; gap: 8px; }
+.pm-strings label { display: grid; gap: 2px; text-transform: none; letter-spacing: 0; }
+.pm-strings .num { width: 4.6em; }

@@ -963,20 +963,24 @@ function fft(re: Float64Array, im: Float64Array) {
   }
 }
 
-/**
- * The two bass strings ring much longer, muted too (real recordings: a good mute on A2/E2 loses 20 dB in
- * 0.45–0.75 s, an unmuted E2 in ~0.8 s and more, the top four strings in 0.15–0.3 s when muted).
- */
-const LOW_F0 = 125;
-export const LOW_LIMIT_K = 2.15;
-/** The 20 dB decay limit for this note's string. */
-export const pmLimitFor = (n: PmNote, limitS: number) => (n.f0 !== null && n.f0 < LOW_F0 ? limitS * LOW_LIMIT_K : limitS);
-/** Palm mute when the note loses 20 dB faster than the limit (longer on the bass strings). */
-export const isPalmMuted = (n: PmNote, limitS: number) => (n.t20 === null ? null : n.t20 <= pmLimitFor(n, limitS));
-
 /** Open strings in standard tuning, as MIDI numbers: E2 A2 D3 G3 B3 E4. */
 export const OPEN_STRINGS = [40, 45, 50, 55, 59, 64];
 const STRING_NAMES = ["E2 (6-я)", "A2 (5-я)", "D3 (4-я)", "G3 (3-я)", "B3 (2-я)", "E4 (1-я)"];
+
+/**
+ * Default 20 dB decay limits, ms, from the 6th string to the 1st. The bass strings ring longer, muted too
+ * (real recordings: an unmuted E2 takes ~800 ms and more, muted top strings 150–300).
+ */
+export const PM_LIMITS_MS = [500, 500, 300, 250, 250, 200];
+/** The string a note is judged as: the highest one whose open note is not above it. */
+const stringOf = (f: number) => {
+  const m = Math.round(69 + 12 * Math.log2(f / 440));
+  return Math.max(0, OPEN_STRINGS.findLastIndex((o) => o <= m));
+};
+/** The 20 dB decay limit for this note's string (`limits` in s, 6th string first); the longest without a pitch. */
+export const pmLimitFor = (n: PmNote, limits: number[]) => (n.f0 === null ? Math.max(...limits) : limits[stringOf(n.f0)]);
+/** Palm mute when the note loses 20 dB faster than its string's limit. */
+export const isPalmMuted = (n: PmNote, limits: number[]) => (n.t20 === null ? null : n.t20 <= pmLimitFor(n, limits));
 
 export interface PitchCheck {
   /** Index into OPEN_STRINGS. */
@@ -1002,7 +1006,7 @@ export function noteOf(f: number, a4 = 440) {
  * Compares each note's pitch with the open string it belongs to. The reference is the median pitch of
  * the open (not muted) notes played on that string, so a guitar tuned a little off is not penalised.
  */
-export function checkPitches(notes: PmNote[], limitS: number, a4 = 440): Map<PmNote, PitchCheck> {
+export function checkPitches(notes: PmNote[], limits: number[], a4 = 440): Map<PmNote, PitchCheck> {
   const nearest = (f: number) => {
     const m = midiOf(f, a4);
     let bi = 0;
@@ -1011,7 +1015,7 @@ export function checkPitches(notes: PmNote[], limitS: number, a4 = 440): Map<PmN
   };
   const refs: number[][] = OPEN_STRINGS.map(() => []);
   for (const n of notes) {
-    if (n.f0 === null || isPalmMuted(n, limitS) !== false) continue;
+    if (n.f0 === null || isPalmMuted(n, limits) !== false) continue;
     const i = nearest(n.f0);
     if (Math.abs(midiOf(n.f0, a4) - OPEN_STRINGS[i]) < 0.6) refs[i].push(n.f0);
   }

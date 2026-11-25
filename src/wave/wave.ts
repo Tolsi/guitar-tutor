@@ -1,7 +1,7 @@
 import workletUrl from "./capture-worklet.ts?worker&url";
 import { SampleStore } from "./store";
 import type { ChannelMode } from "./capture-worklet";
-import { LOW_LIMIT_K, checkPitches, isPalmMuted, noteOf, type PitchCheck, type PmNote } from "./pm";
+import { PM_LIMITS_MS, checkPitches, isPalmMuted, noteOf, pmLimitFor, type PitchCheck, type PmNote } from "./pm";
 import { AMPS, MONITOR_DEFAULTS, Monitor, type DistType, type MonitorSettings } from "./monitor";
 import { BPM_MAX, BPM_MIN, initMetronome, showMetronomeBpm, stopMetronome, toggleMetronome } from "./metronome";
 import { feedTuner, initTuner } from "./tuner";
@@ -15,6 +15,7 @@ const SETTINGS_KEY = "wave-settings";
 
 type GridDiv = "off" | "1" | "4" | "8" | "16";
 
+const PM_LIM_MIN = 50, PM_LIM_MAX = 2000;
 interface Settings {
   deviceId: string;
   outId: string;
@@ -27,7 +28,8 @@ interface Settings {
   showPitch: boolean;
   showLoud: boolean;
   lgStrict: Strictness;
-  pmLimMs: number;
+  /** 20 dB decay limits per string, the 6th first. */
+  pmLimsMs: number[];
   attLimMs: number;
   bpm: number;
   grid: GridDiv;
@@ -56,7 +58,7 @@ function loadSettings(): Settings {
     showPitch: false,
     showLoud: false,
     lgStrict: "normal",
-    pmLimMs: 350,
+    pmLimsMs: [...PM_LIMITS_MS],
     attLimMs: 70,
     bpm: 120,
     grid: "4",
@@ -77,6 +79,10 @@ function loadSettings(): Settings {
     // The two views used to exclude each other.
     if (saved.view === "pitch" && saved.showPitch === undefined) Object.assign(saved, { showWave: false, showPitch: true });
     delete saved.view;
+    // One limit for all strings used to be kept here.
+    delete saved.pmLimMs;
+    const lims = saved.pmLimsMs;
+    if (!Array.isArray(lims) || lims.length !== 6 || !lims.every((v) => v >= PM_LIM_MIN && v <= PM_LIM_MAX)) delete saved.pmLimsMs;
     return { ...d, ...saved, rev: 2, mon: { ...d.mon, ...(saved.mon ?? {}) } };
   } catch {
     return def();
@@ -1489,7 +1495,6 @@ const FIELDS: Field[] = [
   { id: "st-mon", get: () => settings.monOn, set: (v) => (settings.monOn = v as boolean) },
   { id: "st-bpm", get: () => String(settings.bpm), set: (v) => (settings.bpm = Math.min(300, Math.max(30, Number(v) || 120))) },
   { id: "st-grid", get: () => settings.grid, set: (v) => (settings.grid = v as GridDiv) },
-  { id: "st-pmlim", get: () => String(settings.pmLimMs), set: (v) => (settings.pmLimMs = Number(v)), fmt: (v) => `${v} мс` },
   { id: "st-attlim", get: () => String(settings.attLimMs), set: (v) => (settings.attLimMs = Number(v)), fmt: (v) => `${v} мс` },
 ];
 
@@ -1701,7 +1706,7 @@ renderMonitorControls();
 let pmKey = "";
 /** The take the exercise panel reports on: the one being recorded, the selected one, or the latest. */
 const focusTake = (): Take | null => rec?.take ?? selClip?.take ?? tl?.takes.at(-1) ?? null;
-const pmLimit = () => settings.pmLimMs / 1000;
+const pmLimits = () => settings.pmLimsMs.map((v) => v / 1000);
 const attLimit = () => settings.attLimMs / 1000;
 /** A palm-muted note may sit this far from the open string and still count as the same note. */
 const PITCH_TOL = 10;
@@ -1731,7 +1736,7 @@ const median = (a: number[]) => {
 /** Both palm-mute exercises; "pmopen" also checks the muted note keeps the open string's pitch. */
 const pmEx = () => settings.exercise === "pm" || settings.exercise === "pmopen";
 const pitchEx = () => settings.exercise === "pmopen";
-const pitchChecks = (notes: PmNote[]) => (pitchEx() ? checkPitches(notes, pmLimit()) : new Map<PmNote, PitchCheck>());
+const pitchChecks = (notes: PmNote[]) => (pitchEx() ? checkPitches(notes, pmLimits()) : new Map<PmNote, PitchCheck>());
 
 type PmState = "wait" | "pm" | "open" | "nopitch" | "offpitch";
 interface PmVerdict {
@@ -1745,7 +1750,7 @@ interface PmVerdict {
 }
 
 function judgePm(n: PmNote, checks: Map<PmNote, PitchCheck>): PmVerdict {
-  const muted = isPalmMuted(n, pmLimit());
+  const muted = isPalmMuted(n, pmLimits());
   const pitch = checks.get(n) ?? null;
   const slowAttack = n.attack !== null && n.attack > attLimit();
   const double = n.doubleGap !== null;
@@ -1893,7 +1898,7 @@ function renderPm() {
   if (last && v) {
     parts.push(`нота ${fmtNote(last)}`);
     if (v.pitch) parts.push(`от струны ${v.pitch.name} ${fmtCents(v.pitch.cents)}${v.pitch.measuredRef ? "" : " (от строя)"}`);
-    parts.push(`затухание ${fmtT20(last)}`);
+    parts.push(`затухание ${fmtT20(last)} (граница ${fmtSec(pmLimitFor(last, pmLimits()))})`);
     const l = louds.at(-1);
     if (l && l.start === last.start / sr) parts.push(`громкость ${fmtLoud(l)}`);
     if (last.rate !== null) parts.push(`${Math.round(last.rate)} дБ/с`);
@@ -1968,8 +1973,7 @@ function applyExercise() {
   $("wl-card").hidden = !lgEx();
   $<HTMLSelectElement>("wl-strict").value = settings.lgStrict;
   wlKey = "";
-  $<HTMLInputElement>("pm-lim").value = String(settings.pmLimMs);
-  $("pm-lim-v").textContent = `${fmtSec(pmLimit())} (5–6 струны — ${fmtSec(pmLimit() * LOW_LIMIT_K)})`;
+  fillPmLims();
   $<HTMLInputElement>("pm-att-lim").value = String(settings.attLimMs);
   $("pm-att-lim-v").textContent = `${settings.attLimMs} мс`;
   pmKey = "";
@@ -2510,10 +2514,28 @@ $<HTMLInputElement>("pm-att-lim").addEventListener("input", (e) => {
   saveSettings();
   applyExercise();
 });
-$<HTMLInputElement>("pm-lim").addEventListener("input", (e) => {
-  settings.pmLimMs = Number((e.target as HTMLInputElement).value);
-  saveSettings();
-  applyExercise();
-});
+/** The per-string limits, in the exercise panel and in the settings. */
+for (const box of document.querySelectorAll<HTMLElement>(".pm-strings"))
+  box.append(
+    ...settings.pmLimsMs.map((_, i) => {
+      const label = document.createElement("label");
+      const name = document.createElement("span");
+      name.textContent = `${6 - i}-я`;
+      const el = document.createElement("input");
+      Object.assign(el, { type: "number", min: String(PM_LIM_MIN), max: String(PM_LIM_MAX), step: "10", className: "num" });
+      el.addEventListener("change", () => {
+        const v = Number(el.value);
+        if (v >= PM_LIM_MIN && v <= PM_LIM_MAX) settings.pmLimsMs[i] = v;
+        saveSettings();
+        applyExercise();
+      });
+      label.append(name, el);
+      return label;
+    }),
+  );
+function fillPmLims() {
+  for (const box of document.querySelectorAll<HTMLElement>(".pm-strings"))
+    box.querySelectorAll("input").forEach((el, i) => (el.value = String(settings.pmLimsMs[i])));
+}
 if (pmEx()) pmTone();
 applyExercise();

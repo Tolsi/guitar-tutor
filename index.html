@@ -368,7 +368,7 @@
           </fieldset>
           <fieldset>
             <legend>Palm mute</legend>
-            <label class="field"><span>Palm mute, если −20 дБ быстрее, чем <b id="st-pmlim-v" class="mono"></b></span><input id="st-pmlim" type="range" min="100" max="1000" step="10" /></label>
+            <div class="field"><span>Palm mute, если −20 дБ не дольше, чем за, мс (по струнам)</span><div class="pm-strings"></div></div>
             <label class="field"><span>Атака не дольше <b id="st-attlim-v" class="mono"></b></span><input id="st-attlim" type="range" min="5" max="120" step="1" /></label>
           </fieldset>
           <div class="st-actions"><button id="st-close" class="btn" value="ok">Готово</button></div>
@@ -470,10 +470,10 @@
             </div>
           </div>
           <div class="pm-limits">
-            <label class="field pm-lim">
-              <span>Palm mute, если нота теряет 20 дБ быстрее, чем за <b id="pm-lim-v" class="mono"></b></span>
-              <input id="pm-lim" type="range" min="100" max="1000" step="10" />
-            </label>
+            <div class="field">
+              <span>Palm mute, если нота теряет 20 дБ не дольше, чем за, мс (по струнам)</span>
+              <div class="pm-strings"></div>
+            </div>
             <label class="field pm-lim">
               <span>Атака (касание → звук) не дольше <b id="pm-att-lim-v" class="mono"></b></span>
               <input id="pm-att-lim" type="range" min="5" max="120" step="1" />
@@ -481,7 +481,7 @@
           </div>
           <div id="pm-list" class="pm-list" aria-label="Сыгранные ноты"></div>
           <p class="note">
-            Затухание — время, за которое громкость ноты падает на 20 дБ: у приглушённой ноты около 0,1–0,3 с (на басовых 5–6 струнах — до 0,7 с), у открытой — секунда и больше.
+            Затухание — время, за которое громкость ноты падает на 20 дБ: у приглушённой ноты около 0,1–0,3 с (на басовых 5–6 струнах — до 0,5 с), у открытой — секунда и больше; граница у каждой струны своя, струна определяется по высоте ноты в стандартном строе.
             «Глухость» — насколько срезаны верхние гармоники: у palm mute их почти нет.
             Высота приглушённой ноты сравнивается с той же открытой струной: с открытыми нотами, которые вы сыграли на ней, а если их не было — со стандартным строем.
             Сыграйте сначала открытую струну, потом её же с palm mute: нота должна остаться той же (±10 центов), а не превратиться в стук или другую ноту.
