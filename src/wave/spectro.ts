@@ -1,9 +1,10 @@
-// Spectrogram of a take: log frequency, computed a little per frame and drawn from cached tiles.
-import { fft } from "./pm";
+// Spectrogram of a take: log frequency, drawn from cached tiles. Only what is on screen is computed, no finer
+// than the screen can show, a little per frame.
 import type { SampleStore } from "./store";
 
 const N = 2048;
-const HOP = 480;
+/** Column steps, samples: each zoom level has its own tiles. */
+const HOPS = [480, 1920, 7680, 30720];
 const ROWS = 192;
 export const SPEC_LO = 60;
 export const SPEC_HI = 8000;
@@ -12,9 +13,7 @@ const DB_LO = -95;
 const DB_HI = -20;
 /** Columns in a tile. */
 const TILE = 512;
-/** For wide views: columns of COARSE fine ones, the loudest of each. */
-const COARSE = 8;
-const MAX_TILES = 96;
+const MAX_TILES = 64;
 
 /** Height of a frequency, 0 at the bottom … 1 at the top. */
 export const specPos = (hz: number) => Math.log(hz / SPEC_LO) / Math.log(SPEC_HI / SPEC_LO);
@@ -39,59 +38,37 @@ for (let i = 0; i < 256; i++) {
 }
 
 const WIN = new Float64Array(N).map((_, i) => 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / N));
+const COS = new Float64Array(N / 2).map((_, i) => Math.cos((2 * Math.PI * i) / N));
+const SIN = new Float64Array(N / 2).map((_, i) => -Math.sin((2 * Math.PI * i) / N));
+const REV = new Uint16Array(N);
+for (let i = 1, bits = Math.log2(N); i < N; i++) REV[i] = (REV[i >> 1] >> 1) | ((i & 1) << (bits - 1));
 const re = new Float64Array(N), im = new Float64Array(N);
 
-class Level {
-  data = new Uint8Array(ROWS * 1024);
-  cols = 0;
-  /** By tile number; `cols` says how many columns were there when it was painted. */
-  private tiles = new Map<number, { canvas: HTMLCanvasElement; cols: number }>();
-
-  /** Offset of column `c`, made room for. */
-  room(c: number) {
-    if ((c + 1) * ROWS > this.data.length) {
-      const d = new Uint8Array(this.data.length * 2);
-      d.set(this.data);
-      this.data = d;
-    }
-    return c * ROWS;
-  }
-
-  clear() {
-    this.cols = 0;
-    this.tiles.clear();
-  }
-
-  tile(i: number): HTMLCanvasElement | null {
-    const cols = Math.min(TILE, this.cols - i * TILE);
-    if (cols <= 0) return null;
-    let t = this.tiles.get(i);
-    if (!t) {
-      const canvas = document.createElement("canvas");
-      canvas.width = TILE;
-      canvas.height = ROWS;
-      t = { canvas, cols: 0 };
-    }
-    // Most recently used last.
-    this.tiles.delete(i);
-    this.tiles.set(i, t);
-    if (this.tiles.size > MAX_TILES) this.tiles.delete(this.tiles.keys().next().value!);
-    if (t.cols !== cols) {
-      const g = t.canvas.getContext("2d")!;
-      const img = g.createImageData(cols, ROWS);
-      const px = new Uint32Array(img.data.buffer);
-      for (let c = 0; c < cols; c++)
-        for (let r = 0; r < ROWS; r++) px[(ROWS - 1 - r) * cols + c] = LUT[this.data[(i * TILE + c) * ROWS + r]];
-      g.putImageData(img, 0, 0);
-      t.cols = cols;
-    }
-    return t.canvas;
+/** In place; input already in bit-reversed order. */
+function fft() {
+  for (let len = 2; len <= N; len <<= 1) {
+    const half = len >> 1, step = N / len;
+    for (let i = 0; i < N; i += len)
+      for (let k = 0, t = 0; k < half; k++, t += step) {
+        const a = i + k, b = a + half;
+        const tr = re[b] * COS[t] - im[b] * SIN[t], ti = re[b] * SIN[t] + im[b] * COS[t];
+        re[b] = re[a] - tr;
+        im[b] = im[a] - ti;
+        re[a] += tr;
+        im[a] += ti;
+      }
   }
 }
 
+interface Tile {
+  canvas: HTMLCanvasElement;
+  g: CanvasRenderingContext2D;
+  /** Columns computed, from the left. */
+  cols: number;
+}
+
 export class Spectrogram {
-  private fine = new Level();
-  private coarse = new Level();
+  private tiles = new Map<string, Tile>();
   /** Bins a row covers: [from, to). */
   private from = new Uint16Array(ROWS);
   private to = new Uint16Array(ROWS);
@@ -104,56 +81,120 @@ export class Spectrogram {
     }
   }
 
-  /** Computes what is new in `store` until `deadline` (performance.now()). */
-  update(store: SampleStore, deadline: number) {
-    if (this.fine.cols * HOP > store.length + HOP) {
-      this.fine.clear();
-      this.coarse.clear();
+  private tile(hop: number, i: number, make: boolean): Tile | null {
+    const key = `${hop}:${i}`;
+    let t = this.tiles.get(key);
+    if (!t) {
+      if (!make) return null;
+      const canvas = document.createElement("canvas");
+      canvas.width = TILE;
+      canvas.height = ROWS;
+      t = { canvas, g: canvas.getContext("2d")!, cols: 0 };
     }
-    while (this.fine.cols * HOP + N / 2 <= store.length) {
-      if (performance.now() > deadline) return;
-      this.column(store);
-    }
+    // Most recently used last.
+    this.tiles.delete(key);
+    this.tiles.set(key, t);
+    if (this.tiles.size > MAX_TILES) this.tiles.delete(this.tiles.keys().next().value!);
+    return t;
   }
 
-  private column(store: SampleStore) {
-    const c = this.fine.cols;
-    const s = c * HOP - N / 2;
+  /** Computes the tile's missing columns that `store` has the sound for, until the deadline. */
+  private fill(t: Tile, hop: number, i: number, store: SampleStore, ended: boolean, deadline: number) {
+    const first = i * TILE;
+    const have = ended ? Math.ceil(store.length / hop) : Math.floor((store.length - N / 2) / hop) + 1;
+    const until = Math.min(TILE, have - first);
+    const start = t.cols;
+    if (start >= until) return;
+    const px: Uint32Array[] = [];
+    while (t.cols < until && performance.now() < deadline) {
+      // Two columns at once, as the real and the imaginary part; wide columns take the loudest of several.
+      const two = t.cols + 1 < until;
+      const a = new Uint32Array(ROWS), b = new Uint32Array(ROWS);
+      const c = (first + t.cols) * hop;
+      const parts = hop <= N ? 1 : 2;
+      const va = new Float64Array(ROWS), vb = new Float64Array(ROWS);
+      for (let k = 0; k < parts; k++) this.spectra(store, c + (k * hop) / parts, c + hop + (k * hop) / parts, va, vb);
+      for (let r = 0; r < ROWS; r++) {
+        a[r] = color(va[r]);
+        b[r] = color(vb[r]);
+      }
+      px.push(a);
+      t.cols++;
+      if (two) {
+        px.push(b);
+        t.cols++;
+      }
+    }
+    if (!px.length) return;
+    const img = t.g.createImageData(px.length, ROWS);
+    const out = new Uint32Array(img.data.buffer);
+    px.forEach((col, x) => {
+      for (let r = 0; r < ROWS; r++) out[(ROWS - 1 - r) * px.length + x] = col[r];
+    });
+    t.g.putImageData(img, start, 0);
+  }
+
+  /** Peak power per row around samples `ca` and `cb`, kept where louder than what is there. */
+  private spectra(store: SampleStore, ca: number, cb: number, va: Float64Array, vb: Float64Array) {
+    const xa = read(store, ca - N / 2), xb = read(store, cb - N / 2);
     for (let i = 0; i < N; i++) {
-      re[i] = s + i >= 0 ? store.at(s + i) * WIN[i] : 0;
-      im[i] = 0;
+      const j = REV[i];
+      re[j] = xa[i] * WIN[i];
+      im[j] = xb[i] * WIN[i];
     }
-    fft(re, im);
-    const o = this.fine.room(c);
-    for (let r = 0; r < ROWS; r++) {
-      let p = 0;
-      for (let b = this.from[r]; b < this.to[r]; b++) p = Math.max(p, re[b] * re[b] + im[b] * im[b]);
-      // A full-scale sine peaks at N / 4 through the Hann window.
-      const db = 10 * Math.log10((p * 16) / (N * N) + 1e-13);
-      this.fine.data[o + r] = Math.max(0, Math.min(255, ((db - DB_LO) / (DB_HI - DB_LO)) * 255));
-    }
-    this.fine.cols++;
-    const cc = Math.floor(c / COARSE);
-    const q = this.coarse.room(cc);
-    if (c % COARSE === 0) this.coarse.data.fill(0, q, q + ROWS);
-    for (let r = 0; r < ROWS; r++) this.coarse.data[q + r] = Math.max(this.coarse.data[q + r], this.fine.data[o + r]);
-    if (c % COARSE === COARSE - 1) this.coarse.cols = cc + 1;
+    fft();
+    for (let r = 0; r < ROWS; r++)
+      for (let b = this.from[r]; b < this.to[r]; b++) {
+        const m = N - b;
+        const ar = re[b] + re[m], ai = im[b] - im[m], br = im[b] + im[m], bi = re[m] - re[b];
+        va[r] = Math.max(va[r], (ar * ar + ai * ai) / 4);
+        vb[r] = Math.max(vb[r], (br * br + bi * bi) / 4);
+      }
   }
 
-  /** Draws take samples [s0, s1) so that sample s is at x = (s - s0) / spp + x0. */
-  draw(g: CanvasRenderingContext2D, x0: number, y: number, h: number, s0: number, s1: number, spp: number) {
-    const coarse = spp > HOP * COARSE * 0.5;
-    const level = coarse ? this.coarse : this.fine;
-    const hop = coarse ? HOP * COARSE : HOP;
-    const per = TILE * hop;
+  /**
+   * Draws take samples [s0, s1) so that sample s0 is at x0, computing what is missing until the deadline.
+   * `ended`: the take will not grow.
+   */
+  draw(g: CanvasRenderingContext2D, store: SampleStore, ended: boolean, x0: number, y: number, h: number, s0: number, s1: number, spp: number, deadline: number) {
+    // About a column per pixel; never finer than that.
+    let level = 0;
+    while (level + 1 < HOPS.length && HOPS[level + 1] <= spp * 2) level++;
+    // Other levels under it stand in for what is not ready yet.
+    for (let l = HOPS.length - 1; l >= 0; l--) if (l !== level) this.drawLevel(g, l, null, ended, x0, y, h, s0, s1, spp, deadline);
+    this.drawLevel(g, level, store, ended, x0, y, h, s0, s1, spp, deadline);
+  }
+
+  private drawLevel(g: CanvasRenderingContext2D, level: number, store: SampleStore | null, ended: boolean, x0: number, y: number, h: number, s0: number, s1: number, spp: number, deadline: number) {
+    const hop = HOPS[level], per = TILE * hop;
     // A column stands for the sound around its middle.
-    const lead = HOP / 2;
+    const lead = hop > N ? 0 : hop / 2;
+    // Too many tiles of a fine level under a wide view are not worth drawing.
+    if (!store && (s1 - s0) / per > 12) return;
     for (let i = Math.max(0, Math.floor((s0 + lead) / per)); i * per - lead < s1; i++) {
-      const t = level.tile(i);
-      if (!t) break;
+      const t = this.tile(hop, i, store !== null && i * per < store.length);
+      if (!t) continue;
+      if (store) this.fill(t, hop, i, store, ended, deadline);
+      if (!t.cols) continue;
       // Whole pixels, so tiles meet without a seam.
-      const a = Math.round(x0 + (i * per - lead - s0) / spp), b = Math.round(x0 + ((i + 1) * per - lead - s0) / spp);
-      g.drawImage(t, a, y, b - a, h);
+      const a = Math.round(x0 + (i * per - lead - s0) / spp), b = Math.round(x0 + (i * per + t.cols * hop - lead - s0) / spp);
+      if (b > a) g.drawImage(t.canvas, 0, 0, t.cols, ROWS, a, y, b - a, h);
     }
   }
+}
+
+const NONE = new Float32Array(N);
+/** N samples from `from`, zeros outside the store. */
+function read(store: SampleStore, from: number): Float32Array {
+  if (from >= 0 && from + N <= store.length) return store.slice(from, from + N);
+  if (from + N <= 0 || from >= store.length) return NONE;
+  const out = new Float32Array(N);
+  for (let i = Math.max(0, -from); i < N && from + i < store.length; i++) out[i] = store.at(from + i);
+  return out;
+}
+
+function color(power: number) {
+  // A full-scale sine peaks at N / 4 through the Hann window.
+  const db = 10 * Math.log10((power * 16) / (N * N) + 1e-13);
+  return LUT[Math.max(0, Math.min(255, Math.round(((db - DB_LO) / (DB_HI - DB_LO)) * 255)))];
 }

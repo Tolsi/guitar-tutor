@@ -924,6 +924,7 @@ function drawWave() {
     };
     if (settings.showLoud) fitLoud(loudOf);
     const mainH = laneH - loudH(laneH);
+    specDeadline = performance.now() + SPEC_BUDGET_MS;
     for (const c of tl.clips) {
       const x0 = xOf(c.pos / sr), x1 = xOf(clipEnd(c) / sr);
       if (x1 < 0 || x0 > W) continue;
@@ -1173,11 +1174,6 @@ function loop() {
     const ft = focusTake();
     const key = ft ? `${ft.id}:${ft.pm.version}` : "";
     if (pmEx() && key !== pmKey) renderPm();
-  }
-  if (settings.showSpec && tl) {
-    const deadline = performance.now() + 8;
-    const ft = focusTake();
-    for (const t of [...(ft ? [ft] : []), ...tl.takes.filter((t) => t !== ft)]) t.spec.update(t.store, deadline);
   }
   if ((pitchView() || lgEx()) && tl) {
     // The take on screen first; a long import is worked through a little per frame.
@@ -2473,6 +2469,10 @@ function drawPitch(g: CanvasRenderingContext2D, W: number, y0: number, h: number
 
 // ---------- spectrogram ----------
 
+/** Time a frame may spend computing the spectrogram, for all clips together. */
+const SPEC_BUDGET_MS = 14;
+let specDeadline = 0;
+
 function drawSpec(g: CanvasRenderingContext2D, W: number, y0: number, h: number, dpr: number, xOf: (t: number) => number, c: Clip) {
   const top = y0 + Math.max(waveH(h), h > 46 * dpr ? 16 * dpr : 2 * dpr);
   const bottom = y0 + waveH(h) + specH(h) - (pitchView() ? 0 : 2 * dpr);
@@ -2484,7 +2484,7 @@ function drawSpec(g: CanvasRenderingContext2D, W: number, y0: number, h: number,
   g.clip();
   const spp = (viewSpan * sr) / W;
   const s0 = Math.max(c.from, c.from + (viewStart * sr - c.pos));
-  c.take.spec.draw(g, x0, top, bottom - top, s0, Math.min(c.to, s0 + (x1 - x0) * spp), spp);
+  c.take.spec.draw(g, c.take.store, c.take !== rec?.take, x0, top, bottom - top, s0, Math.min(c.to, s0 + (x1 - x0) * spp), spp, specDeadline);
   g.font = `${10 * dpr}px "IBM Plex Mono", ui-monospace, monospace`;
   g.textBaseline = "middle";
   let last = Infinity;

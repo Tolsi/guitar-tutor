@@ -954,7 +954,7 @@ function shs(d: Float64Array, binHz: number) {
   return fc;
 }
 
-export function fft(re: Float64Array, im: Float64Array) {
+function fft(re: Float64Array, im: Float64Array) {
   const n = re.length;
   for (let i = 1, j = 0; i < n; i++) {
     let bit = n >> 1;
