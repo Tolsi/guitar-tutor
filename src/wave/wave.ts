@@ -24,7 +24,7 @@ const CHECKS = {
   tune: "строй ноты",
   loud: "ровность громкости",
   lgWobble: "отклонение",
-  lgStart: "пережим и подъезд в начале",
+  lgStart: "начало ноты (пережим, подъезд, завышение)",
   lgDrift: "уплывание",
   lgTune: "строй ноты",
 } as const;
@@ -33,7 +33,7 @@ const PM_CHECKS: Check[] = ["mute", "pitch", "attack", "double", "tune", "loud"]
 const LG_CHECKS: Check[] = ["lgWobble", "lgStart", "lgDrift", "lgTune"];
 const LG_ISSUES: Partial<Record<Check, IssueKind[]>> = {
   lgWobble: ["wobble"],
-  lgStart: ["overshoot", "undershoot"],
+  lgStart: ["overshoot", "pickSharp", "undershoot"],
   lgDrift: ["driftUp", "driftDown"],
   lgTune: ["sharp", "flat"],
 };

@@ -28,11 +28,12 @@ export const LIMITS: Record<Strictness, Limits> = {
   strict: { wobble: 4, spread: 14, overshoot: 6, drift: 8, center: 10 },
 };
 
-export type IssueKind = "wobble" | "overshoot" | "undershoot" | "driftUp" | "driftDown" | "sharp" | "flat";
+export type IssueKind = "wobble" | "overshoot" | "pickSharp" | "undershoot" | "driftUp" | "driftDown" | "sharp" | "flat";
 
 export const ISSUE_LABEL: Record<IssueKind, string> = {
   wobble: "отклонение",
   overshoot: "пережим в начале",
+  pickSharp: "завышена в начале",
   undershoot: "подъезд снизу",
   driftUp: "уплывает вверх",
   driftDown: "уплывает вниз",
@@ -109,6 +110,9 @@ function linearFit(ts: number[], ys: number[]) {
 
 const ATTACK_SKIP = 0.02;
 const ATTACK_WINDOW = 0.12;
+// A picked string starts sharp by itself (10–15 cents on real open strings, where no finger can be to
+// blame); only more than this is a stroke too hard.
+const PICK_SHARP = 20;
 // The finger letting go or damping the string bends the pitch over the last 50–70 ms (measured on real
 // recordings), and that is no part of holding the note. Short notes give up a quarter at most.
 const TAIL_SKIP = 0.06;
@@ -194,7 +198,11 @@ export function evaluate(note: Note, L: Limits): NoteEval | null {
   else if (down)
     issues.push({ kind: "driftDown", text: `Нота уплывает вниз на ${r(drift)} ц: палец ослабляет нажим раньше времени.` });
   // A wobble or a steady drift already explains an uneven start; don't count it twice.
-  if (!wobbly && !down && overshoot > L.overshoot)
+  // The finger is to blame for an uneven start only when it made the note.
+  if (note.attack === "pick") {
+    if (!wobbly && !down && overshoot > PICK_SHARP)
+      issues.push({ kind: "pickSharp", text: `В начале нота на ${r(overshoot)} ц выше: слишком сильный удар медиатором натягивает струну. Бейте мягче.` });
+  } else if (!wobbly && !down && overshoot > L.overshoot)
     issues.push({ kind: "overshoot", text: `Пережим при ударе: в начале нота на ${r(overshoot)} ц выше, потом опускается. Бейте пальцем точно и не додавливайте.` });
   else if (!wobbly && !up && overshoot < -L.overshoot)
     issues.push({ kind: "undershoot", text: `Нота подъезжает снизу на ${r(overshoot)} ц: палец доходит до лада не сразу. Ставьте его одним движением.` });
