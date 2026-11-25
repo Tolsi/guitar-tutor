@@ -6,7 +6,10 @@ import type { SampleStore } from "./store";
 const HOP_S = 0.005;
 /** RMS window, in hops (20 ms: long enough to smooth the low E period). */
 const WIN = 4;
-const GATE_DB = -55;
+/** Under this there is nothing but noise. */
+const GATE_DB = -75;
+/** Notes are measured again every so many hops, however the samples come (live blocks or a whole file). */
+const MEASURE_HOPS = 4;
 const ONSET_RISE_DB = 8;
 const ONSET_LOOKBACK = 8;
 const REFRACTORY = 16;
@@ -24,8 +27,12 @@ const PRE_HIT_DB = 12;
  * (real recordings: pick hits 19–54 dB, the rest under 16).
  */
 const HIT_HF_DB = 16;
-/** Sounds this much quieter than the notes around them (last 10 s) are noise, unless they lead into a note. */
-const QUIET_DB = 15;
+/** How far under the loudest note around (last 10 s) a hit may be: with a clear pitch, and without (a dead thud). */
+const PITCHED_RANGE_DB = 28;
+const THUD_RANGE_DB = 6;
+const CLEAR_PITCH = 0.9;
+/** The loudest note around counts as at least this loud, so a pause full of noise has no notes. */
+const LOUD_MIN_DB = -49;
 /**
  * A re-pick over a sounding (distorted) string: the spectral flux beats its recent average by this much
  * (real recordings: re-picks 0.07–0.22, distortion swelling on a held note 0.04–0.068)…
@@ -39,8 +46,6 @@ const NEW_STRING_SHARE = 0.71;
 const PRE_TOUCH_S = 0.6;
 /** How far before the note the pick's first touch is looked for in the sound itself. */
 const TOUCH_WINDOW_S = 0.16;
-/** A knock or slap: gone (−20 dB) faster than this, and quieter than the notes. A palm-muted note takes 0.15 s+. */
-const KNOCK_T20_S = 0.09;
 /** Hops after the onset before it is judged a hit or not (150 ms: the touch sound, then the note). */
 const JUDGE_AFTER = 30;
 /** Pitch: measured on the settled note, after the pick's sharp first moments, over PITCH_N samples. */
@@ -178,8 +183,13 @@ export class PmAnalyzer {
       this.frames++;
       this.detectOnset(k, store);
       this.detectFluxOnset(k - 1, store);
+      if (this.frames % MEASURE_HOPS === 0) this.remeasure(store);
     }
-    // Re-measure notes that are still ringing.
+    if (first !== this.frames) this.version++;
+  }
+
+  /** Measures the notes that are still ringing again. */
+  private remeasure(store: SampleStore) {
     for (let i = this.notes.length - 1; i >= 0; i--) {
       // Measuring may merge false starts into the note, removing the notes before it.
       if (i >= this.notes.length) continue;
@@ -188,7 +198,6 @@ export class PmAnalyzer {
       if (n.done && this.judged.has(n)) break;
       this.measure(n, i, store);
     }
-    if (first !== this.frames) this.version++;
   }
 
   private detectOnset(k: number, store: SampleStore) {
@@ -356,29 +365,33 @@ export class PmAnalyzer {
         return;
       }
     }
+    // Compared with the note's full level only: while it is still rising, anything looks loud beside it.
+    const settled = this.judged.has(n);
     // False starts: much quieter hits just before this note (the pick struck, stopped, then struck
     // again) are part of this stroke, not notes of their own.
-    for (let p = this.notes[idx - 1]; idx > 0 && p && p.done; p = this.notes[idx - 1]) {
+    for (let p = this.notes[idx - 1]; settled && idx > 0 && p && p.done; p = this.notes[idx - 1]) {
       const gap = n.start - p.start;
       if (gap > PRE_HIT_S * this.sr || p.peakDb > n.peakDb - PRE_HIT_DB) break;
       this.notes.splice(--idx, 1);
+      this.version++;
+      if (p.peakDb < n.peakDb - PITCHED_RANGE_DB) continue; // not even a stroke: noise of the pick
       n.doubleGap ??= gap / this.sr;
       n.doubleChecked = true;
       this.version++;
     }
     // The same for quiet hits already dropped as notes of their own.
-    for (let g = this.ghosts.length - 1; g >= 0; g--) {
+    for (let g = this.ghosts.length - 1; settled && g >= 0; g--) {
       const gh = this.ghosts[g];
       const gap = n.start - gh.start;
       if (gap <= 0) continue;
       if (gap > PRE_HIT_S * this.sr) break;
-      if (gh.peakDb > n.peakDb - PRE_HIT_DB) continue;
+      if (gh.peakDb > n.peakDb - PRE_HIT_DB || gh.peakDb < n.peakDb - PITCHED_RANGE_DB) continue;
       n.doubleGap ??= gap / this.sr;
       n.doubleChecked = true;
       this.version++;
       break;
     }
-    while (this.ghosts.length && n.start - this.ghosts[0].start > PRE_HIT_S * this.sr) this.ghosts.shift();
+    while (settled && this.ghosts.length && n.start - this.ghosts[0].start > PRE_HIT_S * this.sr) this.ghosts.shift();
     const floor = Math.max(GATE_DB - 5, n.peakDb - 50);
 
     let t20 = -1;
@@ -790,9 +803,9 @@ export class PmAnalyzer {
 
   /**
    * Is this onset a pick hit? "noise": no pick burst (a hand stopping the string, handling noise,
-   * distortion swelling on a held note). "ghost": a pick hit, but far quieter than the notes around it.
+   * distortion swelling on a held note). "ghost": a pick hit, but too quiet beside the notes around it.
    */
-  private judgeHit(n: PmNote, s: number, end: number): "note" | "ghost" | "knock" | "noise" {
+  private judgeHit(n: PmNote, s: number, end: number): "note" | "ghost" | "noise" {
     const hf = this.hopHf;
     let now = 0;
     for (let j = Math.max(0, s - 1); j <= Math.min(end - 1, s + 3); j++) now = Math.max(now, hf[j]);
@@ -809,18 +822,12 @@ export class PmAnalyzer {
         repicked = true;
       }
     } else return "noise"; // the very start of the take: a sound cut in, not a hit heard whole
-    let loud = -Infinity;
-    const from = n.start - 10 * this.sr;
-    for (const m of this.notes) if (m !== n && m.start >= from && m.start < n.start + 10 * this.sr) loud = Math.max(loud, m.peakDb);
-    if (n.peakDb < loud - QUIET_DB) return "ghost";
-    // Without the pick's burst only the loudness vouches for it: a re-pick is about as loud as the notes.
-    if (repicked && n.peakDb < loud - 6) return "noise";
-    // A rattle or a knock with no clear pitch, clearly quieter than the notes: not a note either. (A
-    // dead palm-muted thud as loud as the others is a note, a bad one.)
-    if (n.pitchClarity !== null && n.pitchClarity < 0.8 && n.peakDb < loud - 6) return "knock";
-    // A knock on the guitar or a hand slapping the strings: dies at once.
-    if (n.t20 !== null && n.t20Measured && n.t20 < KNOCK_T20_S && n.peakDb < loud - 6) return "knock";
-    return "note";
+    let loud = LOUD_MIN_DB;
+    for (const m of this.notes) if (m !== n && Math.abs(m.start - n.start) < 10 * this.sr) loud = Math.max(loud, m.peakDb);
+    // A re-pick has no burst to vouch for it: its loudness must.
+    const clear = !repicked && n.pitchClarity !== null && n.pitchClarity >= CLEAR_PITCH;
+    if (n.peakDb >= loud - (clear ? PITCHED_RANGE_DB : THUD_RANGE_DB)) return "note";
+    return repicked || n.peakDb < loud - PITCHED_RANGE_DB ? "noise" : "ghost";
   }
 
   /**
