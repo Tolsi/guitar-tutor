@@ -11,9 +11,12 @@ const AHEAD_HIDDEN_S = 1.6;
 export const BPM_MIN = 30;
 export const BPM_MAX = 300;
 
-const settings = { beats: 4, sub: 1, vol: 70, withTransport: false };
+const settings = { beats: 4, sub: 1, vol: 70, always: true, onPlay: true, onRec: true };
 try {
-  Object.assign(settings, JSON.parse(localStorage.getItem(KEY) ?? "{}"));
+  const { withTransport, ...saved } = JSON.parse(localStorage.getItem(KEY) ?? "{}");
+  // One switch for playback and recording together used to be kept here.
+  if (withTransport) saved.always ??= false;
+  Object.assign(settings, saved);
 } catch {
   /* storage unavailable */
 }
@@ -30,7 +33,7 @@ interface Host {
   bpm: () => number;
   setBpm: (v: number) => void;
   /** What is playing or being recorded, if anything; `pos`: timeline time playing now, s (null when recording). */
-  running: () => { key: object; pos: number | null } | null;
+  running: () => { key: object; pos: number | null; playing: boolean; recording: boolean } | null;
 }
 let host: Host;
 
@@ -73,16 +76,17 @@ function newRun() {
   nextAt = ctx!.currentTime + 0.06;
 }
 
-/** With the transport only: the run being clicked to. */
+/** Unless it always plays: the run being clicked to. */
 let runKey: object | null = null;
 
 /** Follows the transport; false while there is nothing to click to. */
 function followTransport(): boolean {
-  if (!settings.withTransport) {
+  if (settings.always) {
     runKey = null;
     return true;
   }
-  const run = host.running();
+  const now = host.running();
+  const run = now && ((now.playing && settings.onPlay) || (now.recording && settings.onRec)) ? now : null;
   if (run?.key === runKey && run) return true;
   runKey = run?.key ?? null;
   newRun();
@@ -239,14 +243,20 @@ export function initMetronome(h: Host) {
     if (out && ctx) out.gain.setTargetAtTime(gainOf(settings.vol), ctx.currentTime, 0.01);
     save();
   });
-  const only = $<HTMLInputElement>("mt-transport");
-  only.checked = settings.withTransport;
-  only.addEventListener("change", () => {
-    settings.withTransport = only.checked;
-    runKey = null;
-    if (timer) newRun();
-    save();
-  });
+  const when = { always: $<HTMLInputElement>("mt-always"), onPlay: $<HTMLInputElement>("mt-onplay"), onRec: $<HTMLInputElement>("mt-onrec") };
+  const showWhen = () => {
+    for (const k of ["always", "onPlay", "onRec"] as const) when[k].checked = settings[k];
+    when.onPlay.disabled = when.onRec.disabled = settings.always;
+  };
+  for (const k of ["always", "onPlay", "onRec"] as const)
+    when[k].addEventListener("change", () => {
+      settings[k] = when[k].checked;
+      showWhen();
+      runKey = null;
+      if (timer) newRun();
+      save();
+    });
+  showWhen();
   renderDots();
   renderState();
   showMetronomeBpm();

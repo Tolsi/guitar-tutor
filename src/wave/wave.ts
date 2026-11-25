@@ -1570,8 +1570,8 @@ $("wv-ingain-reset").addEventListener("click", () => {
 });
 
 initMetronome({ audio: ensureCtx, bpm: () => settings.bpm, setBpm, running: () => {
-  if (play) return { key: play, pos: playPos() };
-  return rec ? { key: rec, pos: null } : null;
+  const key = play ?? rec;
+  return key && { key, pos: play ? playPos() : null, playing: !!play, recording: !!rec };
 } });
 initTuner({ inputOn: () => !!node, openInput: () => void openInput() });
 

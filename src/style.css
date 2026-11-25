@@ -630,3 +630,5 @@ kbd {
 .checks .check { padding: 0; }
 .checks .check[hidden], .pm-limits [hidden], .wv-stats > [hidden] { display: none; }
 .mt .check { padding: 0; }
+.mt-when { display: grid; gap: 6px; margin-top: -8px; }
+.mt .check:has(input:disabled) { opacity: 0.5; }

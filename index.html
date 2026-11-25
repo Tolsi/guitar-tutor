@@ -306,7 +306,12 @@
             </label>
           </div>
           <label class="field"><span>Громкость</span><input id="mt-vol" type="range" min="0" max="100" step="1" /></label>
-          <label class="check"><input id="mt-transport" type="checkbox" /> Только при проигрывании или записи</label>
+          <div class="field"><span>Играть</span></div>
+          <div class="mt-when" role="group" aria-label="Когда играть">
+            <label class="check"><input id="mt-always" type="checkbox" /> всегда</label>
+            <label class="check"><input id="mt-onplay" type="checkbox" /> при воспроизведении</label>
+            <label class="check"><input id="mt-onrec" type="checkbox" /> при записи</label>
+          </div>
           <button id="mt-play" type="button" class="btn">Старт</button>
         </div>
       </dialog>
