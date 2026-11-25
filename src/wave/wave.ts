@@ -1004,6 +1004,49 @@ function drawClip(g: CanvasRenderingContext2D, c: Clip, x0: number, x1: number, 
   }
 }
 
+/** Verdict on a note, worse is higher; where lanes overlap the worse one shows. */
+const RANK = { none: 0, wait: 1, good: 2, warn: 3, bad: 4 } as const;
+
+/** Verdict per overview column, or null outside the exercises. */
+function overviewRanks(W: number, spp: number): Uint8Array | null {
+  if (!tl || (!pmEx() && !lgEx())) return null;
+  const ranks = new Uint8Array(W);
+  // From a sample of the take to another, as seen through the clip; at least 2 columns, so none is missed.
+  const mark = (c: Clip, from: number, to: number, rank: number) => {
+    const off = c.pos - c.from;
+    const a = Math.floor((Math.max(from, c.from) + off) / spp);
+    const b = Math.max(a + 2, Math.ceil((Math.min(to, c.to) + off) / spp));
+    for (let px = Math.max(0, a); px < Math.min(W, b); px++) ranks[px] = Math.max(ranks[px], rank);
+  };
+  const judged = new Map<Take, { from: number; to: number; rank: number }[]>();
+  const judge = (take: Take) => {
+    if (lgEx())
+      return (take.lg.current ? [...take.lg.notes, take.lg.current] : take.lg.notes).map((n) => ({
+        from: n.start * sr,
+        to: n.end * sr,
+        rank: !n.eval ? RANK.wait : n.eval.clean ? RANK.good : RANK.bad,
+      }));
+    const notes = take.pm.notes;
+    const checks = pitchChecks(notes), loudAt = loudAtOf(loudNotes(take));
+    return notes.map((n, i) => {
+      const v = judgePm(n, checks, loudAt);
+      return {
+        from: n.start,
+        to: Math.min(notes[i + 1]?.start ?? Infinity, n.start + (n.t20 ?? 0.2) * sr),
+        rank: v.state === "wait" ? RANK.wait : v.state === "open" ? RANK.bad : v.state === "pm" && clean(v) ? RANK.good : RANK.warn,
+      };
+    });
+  };
+  for (const c of tl.clips) {
+    let list = judged.get(c.take);
+    if (!list) judged.set(c.take, (list = judge(c.take)));
+    for (const n of list)
+      // A palm-mute note belongs to the clip with its attack; a legato one to every clip it sounds in.
+      if (lgEx() ? n.to > c.from && n.from < c.to : n.from >= c.from && n.from < c.to) mark(c, n.from, n.to, n.rank);
+  }
+  return ranks;
+}
+
 function drawOverview() {
   const { g, W, H, dpr } = fit(over);
   g.fillStyle = col.stage;
@@ -1012,8 +1055,16 @@ function drawOverview() {
   if (!tl || !n) return;
   const mid = H / 2, amp = H / 2 - 3 * dpr;
   const spp = n / W;
+  // In an exercise the wave is grey but for the notes, in the colour of their verdict; a strip below shows
+  // the quiet ones too.
+  const ranks = overviewRanks(W, spp);
+  const colors = [col.text, col.wave, col.good, col.warn, col.clip];
   g.fillStyle = col.wave;
   for (let px = 0; px < W; px++) {
+    if (ranks) {
+      g.fillStyle = colors[ranks[px]];
+      if (ranks[px]) g.fillRect(px, H - 4 * dpr, 1, 3 * dpr);
+    }
     const a = Math.floor(px * spp);
     const b = Math.max(a + 1, Math.floor((px + 1) * spp));
     const [mn, mx] = tl.range(a, b);
