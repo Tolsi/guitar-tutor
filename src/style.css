@@ -622,3 +622,10 @@ kbd {
 .pm-strings { display: flex; flex-wrap: wrap; gap: 8px; }
 .pm-strings label { display: grid; gap: 2px; text-transform: none; letter-spacing: 0; }
 .pm-strings .num { width: 4.6em; }
+
+/* ---------- which checks an exercise runs ---------- */
+.checks { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; }
+.checks b { font-size: 0.9rem; }
+.checks-list { display: flex; flex-wrap: wrap; gap: 4px 16px; }
+.checks .check { padding: 0; }
+.checks .check[hidden], .pm-limits [hidden], .wv-stats > [hidden] { display: none; }

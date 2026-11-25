@@ -1,6 +1,6 @@
 // Pitch tracking of a take for the note-pitch view and the legato exercise: the legato tab's tracker and
 // judgement, run over recorded samples instead of a live input.
-import { LIMITS, NoteTracker, type Limits, type Note } from "../legato/notes";
+import { LIMITS, NoteTracker, type IssueKind, type Limits, type Note } from "../legato/notes";
 import { YinStream } from "../legato/yin";
 import type { SampleStore } from "./store";
 
@@ -31,9 +31,10 @@ export class LegatoAnalyzer {
     return this.tracker.current;
   }
 
-  setLimits(l: Limits) {
-    if (this.tracker.limits === l) return;
+  setLimits(l: Limits, off: ReadonlySet<IssueKind>) {
+    if (this.tracker.limits === l && this.tracker.off === off) return;
     this.tracker.limits = l;
+    this.tracker.off = off;
     this.tracker.reevaluate();
     this.version++;
   }

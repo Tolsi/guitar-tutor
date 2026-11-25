@@ -218,6 +218,8 @@ export class NoteTracker {
 
   opts: TrackerOpts;
   limits: Limits;
+  /** Kinds of issues left out of the judgement. */
+  off: ReadonlySet<IssueKind> = new Set();
 
   constructor(opts: TrackerOpts, limits: Limits) {
     this.opts = opts;
@@ -260,7 +262,16 @@ export class NoteTracker {
   }
 
   reevaluate() {
-    for (const n of this.notes) n.eval = evaluate(n, this.limits);
+    for (const n of this.notes) n.eval = this.judge(n);
+  }
+
+  // Issues are dropped afterwards rather than not looked for: one left out still explains away those it
+  // would have explained, so switching a check off never brings up another error.
+  private judge(n: Note): NoteEval | null {
+    const ev = evaluate(n, this.limits);
+    if (!ev || !this.off.size) return ev;
+    const issues = ev.issues.filter((i) => !this.off.has(i.kind));
+    return { ...ev, issues, clean: issues.length === 0 };
   }
 
   /** Returns the note that just ended, if any. */
@@ -316,7 +327,7 @@ export class NoteTracker {
     const n = this.current;
     this.current = null;
     if (!n) return null;
-    n.eval = evaluate(n, this.limits);
+    n.eval = this.judge(n);
     if (!n.eval) return null;
     this.notes.push(n);
     if (this.notes.length > (this.opts.maxNotes ?? 300)) this.notes.shift();

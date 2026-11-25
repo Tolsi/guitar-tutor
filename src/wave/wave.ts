@@ -15,6 +15,29 @@ const SETTINGS_KEY = "wave-settings";
 
 type GridDiv = "off" | "1" | "4" | "8" | "16";
 
+/** What the exercises judge; each can be switched off. */
+const CHECKS = {
+  mute: "приглушение",
+  pitch: "высота как у открытой струны",
+  attack: "длина атаки",
+  double: "двойная атака",
+  tune: "строй ноты",
+  loud: "ровность громкости",
+  lgWobble: "отклонение",
+  lgStart: "пережим и подъезд в начале",
+  lgDrift: "уплывание",
+  lgTune: "строй ноты",
+} as const;
+type Check = keyof typeof CHECKS;
+const PM_CHECKS: Check[] = ["mute", "pitch", "attack", "double", "tune", "loud"];
+const LG_CHECKS: Check[] = ["lgWobble", "lgStart", "lgDrift", "lgTune"];
+const LG_ISSUES: Partial<Record<Check, IssueKind[]>> = {
+  lgWobble: ["wobble"],
+  lgStart: ["overshoot", "undershoot"],
+  lgDrift: ["driftUp", "driftDown"],
+  lgTune: ["sharp", "flat"],
+};
+
 const PM_LIM_MIN = 50, PM_LIM_MAX = 2000;
 interface Settings {
   deviceId: string;
@@ -31,6 +54,8 @@ interface Settings {
   /** 20 dB decay limits per string, the 6th first. */
   pmLimsMs: number[];
   attLimMs: number;
+  /** Checks switched off in the exercises. */
+  checksOff: Check[];
   /** A note this many dB louder or quieter than its neighbours on the string is uneven. */
   loudTolDb: number;
   bpm: number;
@@ -62,6 +87,7 @@ function loadSettings(): Settings {
     lgStrict: "normal",
     pmLimsMs: [...PM_LIMITS_MS],
     attLimMs: 70,
+    checksOff: [],
     loudTolDb: 2.5,
     bpm: 120,
     grid: "4",
@@ -84,6 +110,7 @@ function loadSettings(): Settings {
     delete saved.view;
     // One limit for all strings used to be kept here.
     delete saved.pmLimMs;
+    if (!Array.isArray(saved.checksOff)) delete saved.checksOff;
     const lims = saved.pmLimsMs;
     if (!Array.isArray(lims) || lims.length !== 6 || !lims.every((v) => v >= PM_LIM_MIN && v <= PM_LIM_MAX)) delete saved.pmLimsMs;
     return { ...d, ...saved, rev: 2, mon: { ...d.mon, ...(saved.mon ?? {}) } };
@@ -1061,7 +1088,7 @@ function loop() {
     const deadline = performance.now() + 10;
     const ft = focusTake();
     for (const t of [...(ft ? [ft] : []), ...tl.takes.filter((t) => t !== ft)]) {
-      t.lg.setLimits(LIMITS[settings.lgStrict]);
+      t.lg.setLimits(LIMITS[settings.lgStrict], lgOff);
       t.lg.update(t.dry ?? t.store, t !== rec?.take, deadline);
     }
     if (lgEx()) {
@@ -1755,11 +1782,15 @@ interface PmVerdict {
   uneven: number | null;
 }
 
+const checked = (c: Check) => !settings.checksOff.includes(c);
+/** Legato issues not judged; replaced, never changed, so the analyzers notice. */
+let lgOff: ReadonlySet<IssueKind> = new Set(LG_CHECKS.filter((c) => !checked(c)).flatMap((c) => LG_ISSUES[c]!));
+
 /** Loudness of the notes by their start, s. */
 type LoudAt = Map<number, LoudNote>;
 const loudAtOf = (notes: LoudNote[]): LoudAt => new Map(notes.map((l) => [l.start, l]));
 const unevenBy = (l: LoudNote | undefined) =>
-  l && l.comparable && l.diff !== null && Math.abs(l.diff) > settings.loudTolDb ? l.diff : null;
+  l && checked("loud") && l.comparable && l.diff !== null && Math.abs(l.diff) > settings.loudTolDb ? l.diff : null;
 function fmtTol(v: number) {
   return `±${String(v).replace(".", ",")} дБ`;
 }
@@ -1767,16 +1798,16 @@ function fmtTol(v: number) {
 function judgePm(n: PmNote, checks: Map<PmNote, PitchCheck>, loudAt: LoudAt): PmVerdict {
   const muted = isPalmMuted(n, pmLimits());
   const pitch = checks.get(n) ?? null;
-  const slowAttack = n.attack !== null && n.attack > attLimit();
-  const double = n.doubleGap !== null;
+  const slowAttack = checked("attack") && n.attack !== null && n.attack > attLimit();
+  const double = checked("double") && n.doubleGap !== null;
   const cents = n.f0 === null ? null : noteOf(n.f0).cents;
-  const detune = cents !== null && Math.abs(cents) > TUNE_TOL ? cents : null;
+  const detune = checked("tune") && cents !== null && Math.abs(cents) > TUNE_TOL ? cents : null;
   const uneven = unevenBy(loudAt.get(n.start / sr));
   const v = (state: PmState): PmVerdict => ({ state, pitch, slowAttack, double, detune, uneven });
   if (muted === null) return v("wait");
-  if (!muted) return v("open");
+  if (!muted && checked("mute")) return v("open");
   // The pitch is measured 15–60 ms after the attack; until then the note is still pending.
-  if (!pitchEx()) return v("pm");
+  if (!pitchEx() || !checked("pitch")) return v("pm");
   if (n.bright === null && n.pitchClarity === null) return v("wait");
   if (!pitch) return v("nopitch");
   return v(Math.abs(pitch.cents) <= PITCH_TOL ? "pm" : "offpitch");
@@ -1803,6 +1834,8 @@ const STATE_TITLE: Record<PmState, string> = {
   nopitch: "Palm mute без высоты",
   offpitch: "Palm mute, но нота другая",
 };
+/** Names that say nothing of the mute, for when it is not judged. */
+const NEUTRAL: Record<PmState, string> = { wait: "Измеряю…", pm: "Нота", open: "Нота", nopitch: "Нота без высоты", offpitch: "Другая нота" };
 const STATE_SHORT: Record<PmState, string> = { wait: "…", pm: "PM", open: "откр.", nopitch: "PM без высоты", offpitch: "PM, другая нота" };
 const STATE_HINT: Partial<Record<PmState, string>> = {
   nopitch: "Слышен только стук: ладонь слишком далеко от подставки или давит слишком сильно. Сдвиньте её к подставке.",
@@ -1875,7 +1908,7 @@ function drawPmMarks(
       g.globalAlpha = 1;
       g.fillRect(Math.round(x20), y - 4 * dpr, dpr, 11 * dpr);
     }
-    let label = `${STATE_SHORT[v.state]} ${fmtNote(n)}${v.detune !== null && v.state !== "wait" ? "!" : ""} ${fmtT20(n)}`;
+    let label = `${checked("mute") ? STATE_SHORT[v.state] : (v.state === "pm" ? "" : NEUTRAL[v.state].toLowerCase())} ${fmtNote(n)}${v.detune !== null && v.state !== "wait" ? "!" : ""} ${fmtT20(n)}`;
     if (v.pitch && v.state !== "wait") label += ` стр.${fmtCents(v.pitch.cents)}`;
     if (v.double) label += " ×2";
     if (v.uneven !== null) label += ` ${fmtDiff(v.uneven)} дБ`;
@@ -1910,10 +1943,12 @@ function renderPm() {
   const v = last ? judgePm(last, checks, loudAt) : null;
   const allGood = !!v && v.state === "pm" && clean(v);
   box.dataset.state = !v || v.state === "wait" ? "none" : allGood ? "pm" : v.state === "open" ? "open" : "warn";
-  $("pm-badge").textContent = !v ? "—" : v.state === "wait" ? "…" : allGood ? "PM" : v.state === "open" ? "✕" : "!";
+  $("pm-badge").textContent = !v ? "—" : v.state === "wait" ? "…" : allGood ? (checked("mute") ? "PM" : "✓") : v.state === "open" ? "✕" : "!";
   let title = !v
     ? recording ? "Сыграйте ноту" : `Нажмите ● и сыграйте ${pitchEx() ? "открытую струну" : "ноту"}`
-    : v.state === "pm" && !pitchEx() ? "Palm mute" : STATE_TITLE[v.state];
+    : checked("mute")
+      ? v.state === "pm" && (!pitchEx() || !checked("pitch")) ? "Palm mute" : STATE_TITLE[v.state]
+      : NEUTRAL[v.state];
   if (v && v.state !== "wait") {
     const extra = [v.double ? "двойная атака" : "", v.slowAttack ? "долгая атака" : "", v.detune !== null ? "нота не строит" : "", v.uneven !== null ? (v.uneven > 0 ? "громче соседних" : "тише соседних") : ""].filter(Boolean);
     if (extra.length) title += ` · ${extra.join(", ")}`;
@@ -1923,7 +1958,7 @@ function renderPm() {
   if (last && v) {
     parts.push(`нота ${fmtNote(last)}`);
     if (v.pitch) parts.push(`от струны ${v.pitch.name} ${fmtCents(v.pitch.cents)}${v.pitch.measuredRef ? "" : " (от строя)"}`);
-    parts.push(`затухание ${fmtT20(last)} (граница ${fmtSec(pmLimitFor(last, pmLimits()))})`);
+    parts.push(`затухание ${fmtT20(last)}${checked("mute") ? ` (граница ${fmtSec(pmLimitFor(last, pmLimits()))})` : ""}`);
     const l = louds.at(-1);
     if (l && l.start === last.start / sr) parts.push(`громкость ${fmtLoud(l)}`);
     if (last.rate !== null) parts.push(`${Math.round(last.rate)} дБ/с`);
@@ -1966,7 +2001,7 @@ function renderPm() {
         const pitch =
           fmtNote(n) + (pitchEx() && j.pitch ? ` (от ${j.pitch.name.split(" ")[0]} ${fmtCents(j.pitch.cents)})` : "") + " · ";
         b.innerHTML =
-          `<b>${j.state === "wait" ? "…" : STATE_SHORT[j.state] === "PM" ? "Palm mute" : STATE_SHORT[j.state] === "откр." ? "Открытая" : STATE_SHORT[j.state]}</b>` +
+          `<b>${!checked("mute") && j.state !== "wait" ? NEUTRAL[j.state] : j.state === "wait" ? "…" : STATE_SHORT[j.state] === "PM" ? "Palm mute" : STATE_SHORT[j.state] === "откр." ? "Открытая" : STATE_SHORT[j.state]}</b>` +
           `<span>${m}:${(t - m * 60).toFixed(2).padStart(5, "0")} · ${fmtT20(n)}</span>` +
           `<span>${pitch}атака ${fmtAtt(n.attack)}${j.slowAttack ? " !" : ""}</span>` +
           (j.uneven !== null ? `<span class="pm-bad">${j.uneven > 0 ? "громче" : "тише"} соседних</span>` : "") +
@@ -1988,7 +2023,21 @@ function renderPm() {
 
 function applyExercise() {
   const isPm = pmEx();
-  $("pm-pitch-tile").hidden = !pitchEx();
+  // What is not judged is not counted either; the plain measurements stay.
+  const tile = (id: string, on: boolean) => ($(id).parentElement!.hidden = !on);
+  tile("pm-pitch", pitchEx() && checked("pitch"));
+  tile("pm-share", checked("mute"));
+  tile("pm-t-open", checked("mute"));
+  tile("pm-att-ok", checked("attack") || checked("double"));
+  tile("pm-doubles", checked("double"));
+  tile("pm-even", checked("loud"));
+  for (const el of document.querySelectorAll<HTMLElement>("[data-check]")) {
+    const c = el.dataset.check as Check;
+    el.querySelector("input")!.checked = checked(c);
+    el.hidden = c === "pitch" && !pitchEx();
+  }
+  for (const el of document.querySelectorAll<HTMLElement>("[data-for-check]")) el.hidden = !checked(el.dataset.forCheck as Check);
+  $("pm-t-name").textContent = checked("mute") ? "Затухание PM" : "Затухание";
   $("pm-title").textContent = pitchEx() ? "Упражнение: palm mute открытых струн" : "Упражнение: palm mute";
   $("pm-sub").textContent = pitchEx()
     ? "открытые струны с ребром ладони у подставки: нота глухая, но той же высоты, что и без приглушения"
@@ -2357,7 +2406,7 @@ function drawLoud(g: CanvasRenderingContext2D, W: number, y0: number, h: number,
     if (nx1 < 0) continue;
     if (nx0 > W) break;
     const w = Math.max(2 * dpr, nx1 - nx0 - dpr), y = Y(n.db);
-    g.fillStyle = !n.comparable ? col.wave : unevenBy(n) === null ? col.good : col.clip;
+    g.fillStyle = !n.comparable || !checked("loud") ? col.wave : unevenBy(n) === null ? col.good : col.clip;
     g.globalAlpha = 0.3;
     g.fillRect(nx0, y, w, bottom - y);
     g.globalAlpha = 1;
@@ -2571,5 +2620,23 @@ function fillPmLims() {
   for (const box of document.querySelectorAll<HTMLElement>(".pm-strings"))
     box.querySelectorAll("input").forEach((el, i) => (el.value = String(settings.pmLimsMs[i])));
 }
+for (const [id, list] of [["pm-checks", PM_CHECKS], ["wl-checks", LG_CHECKS]] as const)
+  $(id).append(
+    ...list.map((c) => {
+      const label = document.createElement("label");
+      label.className = "check";
+      label.dataset.check = c;
+      const el = document.createElement("input");
+      el.type = "checkbox";
+      el.addEventListener("change", () => {
+        settings.checksOff = el.checked ? settings.checksOff.filter((o) => o !== c) : [...settings.checksOff, c];
+        lgOff = new Set(LG_CHECKS.filter((k) => !checked(k)).flatMap((k) => LG_ISSUES[k]!));
+        saveSettings();
+        applyExercise();
+      });
+      label.append(el, CHECKS[c]);
+      return label;
+    }),
+  );
 if (pmEx()) pmTone();
 applyExercise();

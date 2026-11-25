@@ -461,8 +461,8 @@
             <div class="wv-stats pm-stats">
               <div><span>Нот</span><b id="pm-count" class="mono">0</b></div>
               <div><span>С palm mute</span><b id="pm-share" class="mono">—</b></div>
-              <div id="pm-pitch-tile"><span>Нота как у открытой</span><b id="pm-pitch" class="mono">—</b><small>из приглушённых, ±10 ц</small></div>
-              <div><span>Затухание PM</span><b id="pm-t-pm" class="mono">—</b><small>до −20 дБ, медиана</small></div>
+              <div><span>Нота как у открытой</span><b id="pm-pitch" class="mono">—</b><small>из приглушённых, ±10 ц</small></div>
+              <div><span id="pm-t-name">Затухание PM</span><b id="pm-t-pm" class="mono">—</b><small>до −20 дБ, медиана</small></div>
               <div><span>Затухание открытых</span><b id="pm-t-open" class="mono">—</b><small>до −20 дБ, медиана</small></div>
               <div><span>Атака</span><b id="pm-att" class="mono">—</b><small>касание → звук, медиана</small></div>
               <div><span>Чистая атака</span><b id="pm-att-ok" class="mono">—</b><small>одна, не дольше границы</small></div>
@@ -471,16 +471,17 @@
               <div><span>Двойных атак</span><b id="pm-doubles" class="mono">0</b></div>
             </div>
           </div>
+          <div class="checks" role="group" aria-label="Что оценивать"><b>Оценивать:</b><div id="pm-checks" class="checks-list"></div></div>
           <div class="pm-limits">
-            <div class="field">
+            <div class="field" data-for-check="mute">
               <span>Palm mute, если нота теряет 20 дБ не дольше, чем за, мс (по струнам)</span>
               <div class="pm-strings"></div>
             </div>
-            <label class="field pm-lim">
+            <label class="field pm-lim" data-for-check="attack">
               <span>Атака (касание → звук) не дольше <b id="pm-att-lim-v" class="mono"></b></span>
               <input id="pm-att-lim" type="range" min="5" max="120" step="1" />
             </label>
-            <label class="field pm-lim">
+            <label class="field pm-lim" data-for-check="loud">
               <span>Громкость отличается от соседних не больше чем на <b id="pm-loud-tol-v" class="mono"></b></span>
               <input id="pm-loud-tol" type="range" min="0.5" max="8" step="0.5" />
             </label>
@@ -520,6 +521,7 @@
               <div><span>Частая ошибка</span><b id="wl-top">—</b></div>
             </div>
           </div>
+          <div class="checks" role="group" aria-label="Что оценивать"><b>Оценивать:</b><div id="wl-checks" class="checks-list"></div></div>
           <canvas id="wl-detail" class="lg-detail" aria-label="Высота ноты в центах"></canvas>
           <label class="field">
             <span>Строгость</span>
