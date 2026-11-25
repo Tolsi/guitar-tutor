@@ -370,6 +370,7 @@
             <legend>Palm mute</legend>
             <div class="field"><span>Palm mute, если −20 дБ не дольше, чем за, мс (по струнам)</span><div class="pm-strings"></div></div>
             <label class="field"><span>Атака не дольше <b id="st-attlim-v" class="mono"></b></span><input id="st-attlim" type="range" min="5" max="120" step="1" /></label>
+            <label class="field"><span>Громкость отличается от соседних не больше чем на <b id="st-loudtol-v" class="mono"></b></span><input id="st-loudtol" type="range" min="0.5" max="8" step="0.5" /></label>
           </fieldset>
           <div class="st-actions"><button id="st-close" class="btn" value="ok">Готово</button></div>
         </form>
@@ -466,6 +467,7 @@
               <div><span>Атака</span><b id="pm-att" class="mono">—</b><small>касание → звук, медиана</small></div>
               <div><span>Чистая атака</span><b id="pm-att-ok" class="mono">—</b><small>одна, не дольше границы</small></div>
               <div><span>Громкость нот</span><b id="pm-loud" class="mono">—</b><small id="pm-loud-range">медиана</small></div>
+              <div><span>Ровных по громкости</span><b id="pm-even" class="mono">—</b><small id="pm-even-tol"></small></div>
               <div><span>Двойных атак</span><b id="pm-doubles" class="mono">0</b></div>
             </div>
           </div>
@@ -478,6 +480,10 @@
               <span>Атака (касание → звук) не дольше <b id="pm-att-lim-v" class="mono"></b></span>
               <input id="pm-att-lim" type="range" min="5" max="120" step="1" />
             </label>
+            <label class="field pm-lim">
+              <span>Громкость отличается от соседних не больше чем на <b id="pm-loud-tol-v" class="mono"></b></span>
+              <input id="pm-loud-tol" type="range" min="0.5" max="8" step="0.5" />
+            </label>
           </div>
           <div id="pm-list" class="pm-list" aria-label="Сыгранные ноты"></div>
           <p class="note">
@@ -488,7 +494,7 @@
             Атака — от касания медиатором струны (первый шорох) до момента, когда нота зазвучала: чем короче, тем чётче удар.
             Двойная атака — медиатор задел струну дважды подряд (два щелчка в пределах ~80 мс): звучит как «флэм» и смазывает ритм.
             Если приглушение слабое, нота звенит дольше границы — двиньте ладонь ближе к грифу или прижмите сильнее; если нота глохнет без высоты, ладонь слишком далеко от подставки.
-            Нажмите на ноту в списке, чтобы перейти к ней на волне.
+            Громкость ноты сравнивается с четырьмя ближайшими на той же струне (не дальше 5 с); если соседей меньше трёх, нота не оценивается. Нажмите на ноту в списке, чтобы перейти к ней на волне.
           </p>
         </section>
 

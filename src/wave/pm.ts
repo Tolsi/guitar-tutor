@@ -973,7 +973,7 @@ const STRING_NAMES = ["E2 (6-я)", "A2 (5-я)", "D3 (4-я)", "G3 (3-я)", "B3 (2
  */
 export const PM_LIMITS_MS = [500, 500, 300, 250, 250, 200];
 /** The string a note is judged as: the highest one whose open note is not above it. */
-const stringOf = (f: number) => {
+export const stringOf = (f: number) => {
   const m = Math.round(69 + 12 * Math.log2(f / 440));
   return Math.max(0, OPEN_STRINGS.findLastIndex((o) => o <= m));
 };
